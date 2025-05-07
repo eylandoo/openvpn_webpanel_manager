@@ -1,6 +1,7 @@
 #!/bin/bash
 wget -q -O /root/install_vpn.sh https://eylan.ir/v2/install_vpn.sh
 chmod +x /root/install_vpn.sh
+
 # رنگ‌ها برای نمایش زیباتر
 RED='\033[1;31m'
 GREEN='\033[1;32m'
@@ -34,11 +35,7 @@ uninstall_openvpn() {
     sudo rm -rf /etc/openvpn
     sudo rm -rf /root/openvpn.sh
     sudo rm -rf /root/answers.txt
-# حذف تمام فایل‌های .ovpn در مسیر /root/
-    echo -e "${YELLOW}[+] Removing all .ovpn files in /root/...${RESET}"
-    rm -f /root/*.ovpn
     echo -e "${GREEN}[✔] OpenVPN has been uninstalled successfully!${RESET}"
-    sleep 2
 }
 
 # تابع حذف پنل وب
@@ -50,12 +47,11 @@ uninstall_web_panel() {
     rm -rf /root/app /root/ovpnfiles
     rm /root/instance/users.db
     echo -e "${GREEN}[✔] OpenVPN Web Panel has been uninstalled successfully!${RESET}"
-    sleep 2
 }
 
 # نمایش منوی اصلی
 show_menu() {
-    clear
+    reset  # برای پاک‌کردن صفحه به‌جای clear
     echo -e "${CYAN}====================================="
     echo -e "      🚀 OpenVPN Management Menu     "
     echo -e "=====================================${RESET}"
@@ -101,24 +97,19 @@ while true; do
         1)
             if [[ "$(check_openvpn_installed)" == "installed" ]]; then
                 echo -e "${RED}OpenVPN is already installed!${RESET}"
-                sleep 2
             else
                 echo -e "${YELLOW}Installing OpenVPN...${RESET}"
                 bash install_vpn.sh
-                sleep 3
             fi
             ;;
         2)
             if [[ "$(check_web_panel_installed)" == "installed" ]]; then
                 echo -e "${RED}OpenVPN Web Panel is already installed!${RESET}"
-                sleep 2
             elif [[ "$(check_openvpn_installed)" == "not_installed" ]]; then
                 echo -e "${RED}Please install OpenVPN Core first!${RESET}"
-                sleep 2
             else
                 echo -e "${YELLOW}Installing OpenVPN Web Panel...${RESET}"
                 bash install_web_panel.sh
-                sleep 3
             fi
             ;;
         3)
@@ -129,11 +120,9 @@ while true; do
                     uninstall_openvpn
                 else
                     echo -e "${YELLOW}Uninstall canceled.${RESET}"
-                    sleep 2
                 fi
             else
                 echo -e "${RED}OpenVPN is not installed!${RESET}"
-                sleep 2
             fi
             ;;
         4)
@@ -144,11 +133,9 @@ while true; do
                     uninstall_web_panel
                 else
                     echo -e "${YELLOW}Uninstall canceled.${RESET}"
-                    sleep 2
                 fi
             else
                 echo -e "${RED}OpenVPN Web Panel is not installed!${RESET}"
-                sleep 2
             fi
             ;;
         5)
@@ -157,7 +144,6 @@ while true; do
             ;;
         *)
             echo -e "${RED}Invalid choice! Please select again.${RESET}"
-            sleep 2
             ;;
     esac
 done
