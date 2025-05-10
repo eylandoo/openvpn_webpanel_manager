@@ -53,15 +53,15 @@ check_openvpn_installed() {
 }
 
 check_web_panel_installed() {
-    systemctl is-active --quiet openvpn_manager && echo "installed" || echo "not_installed"
+    [[ -f /root/app ]] && echo "installed" || echo "not_installed"
 }
 
 
 show_panel_info() {
     echo -e "${CYAN}========= OpenVPN Web Panel Info =========${RESET}"
 
-    if ! systemctl is-active --quiet openvpn_manager; then
-        echo -e "${RED}OpenVPN Web Panel service is not running!${RESET}"
+ if [[ ! -f /root/app ]]; then
+        echo -e "${RED}OpenVPN Web Panel is not installed!${RESET}"
         return
     fi
 
@@ -91,22 +91,32 @@ show_panel_info() {
     echo -e "\n${CYAN}========= Service Commands =========${RESET}"
     echo -e "${YELLOW}To restart OpenVPN Core:${RESET}"
     echo -e "${BLUE}systemctl restart openvpn-server@server${RESET}"
-
     echo -e "${YELLOW}To restart Web Panel:${RESET}"
     echo -e "${BLUE}systemctl restart openvpn_manager${RESET}"
-
-
 
     echo -e "\n${CYAN}========= Log Monitoring =========${RESET}"
     echo -e "${YELLOW}OpenVPN Core Logs:${RESET}"
     echo -e "${BLUE}journalctl -u openvpn-server@server -e -f${RESET}"
-
     echo -e "${YELLOW}Web Panel Logs:${RESET}"
     echo -e "${BLUE}journalctl -u openvpn_manager -e -f${RESET}"
+
+    echo -e "\n${CYAN}========= Service Status =========${RESET}"
+    if systemctl is-active --quiet openvpn-server@server; then
+        echo -e "${GREEN}[✔] OpenVPN Core service is running${RESET}"
+    else
+        echo -e "${RED}[✘] OpenVPN Core service is NOT running${RESET}"
+    fi
+
+    if systemctl is-active --quiet openvpn_manager; then
+        echo -e "${GREEN}[✔] Web Panel service is running${RESET}"
+    else
+        echo -e "${RED}[✘] Web Panel service is NOT running${RESET}"
+    fi
 
     echo
     read -p "Press Enter to return to menu..."
 }
+
 
 show_menu() {
     reset
