@@ -20,7 +20,7 @@ fi
 wget -q -O /root/install_vpn.sh https://eylan.ir/v2/install_vpn.sh
 chmod +x /root/install_vpn.sh
 
-# رنگ‌ها برای نمایش زیباتر
+
 RED='\033[1;31m'
 GREEN='\033[1;32m'
 YELLOW='\033[1;33m'
