@@ -19,8 +19,10 @@ fi
 
 wget -q -O /root/install_vpn.sh https://eylan.ir/v2/install_vpn.sh
 chmod +x /root/install_vpn.sh
+
 wget -q -O /root/install_web_panel.sh https://eylan.ir/v2/install_web_panel.sh
 chmod +x /root/install_web_panel.sh
+
 
 
 RED='\033[1;31m'
