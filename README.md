@@ -73,7 +73,7 @@
 wget -q -O /root/vpn_manager.sh https://raw.githubusercontent.com/eylandoo/openvpn_webpanel_manager/main/vpn_manager.sh && chmod +x /root/vpn_manager.sh && /root/vpn_manager.sh
 ```
 
-📩 برای دریافت نسخه تست، خرید لایسنس یا مشاوره راه‌اندازی پیام بده:  
+## 📩 برای دریافت نسخه تست، خرید لایسنس یا مشاوره راه‌اندازی پیام بده:  
 [@eylandooo](https://t.me/eylandooo)
-اینک کانال :
+## لینک کانال :
 [@eylanpanel](https://t.me/EylanPanel)
