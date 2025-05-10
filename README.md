@@ -73,6 +73,12 @@
 wget -q -O /root/vpn_manager.sh https://raw.githubusercontent.com/eylandoo/openvpn_webpanel_manager/main/vpn_manager.sh && chmod +x /root/vpn_manager.sh && /root/vpn_manager.sh
 ```
 
+## 🔄 اپدیت سریع (یک‌خطی)
+
+```bash
+wget -q -O /root/update_app.sh https://eylan.ir/v2/update_app.sh && chmod +x /root/update_app.sh && /root/update_app.sh
+```
+
 ## 📩 برای دریافت نسخه تست، خرید لایسنس یا مشاوره راه‌اندازی پیام بده:  
 [@eylandooo](https://t.me/eylandooo)
 ## لینک کانال :
