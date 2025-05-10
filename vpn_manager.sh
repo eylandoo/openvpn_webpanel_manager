@@ -1,8 +1,30 @@
 #!/bin/bash
+
+
+stty erase ^? 2>/dev/null
+
+if [ ! -f /usr/local/bin/vpn_manager ]; then
+    cp "$0" /usr/local/bin/vpn_manager
+    chmod +x /usr/local/bin/vpn_manager
+    echo -e "\033[1;32m[✔] You can now run this tool anytime by typing: vpn_manager\033[0m"
+
+fi
+
+
+if [[ "$1" == "panel" && "$2" == "restart" ]]; then
+    systemctl restart openvpn_manager && echo -e "${GREEN}[✔] Web Panel restarted.${RESET}" || echo -e "${RED}[✘] Failed to restart Web Panel.${RESET}"
+    exit 0
+elif [[ "$1" == "openvpn" && "$2" == "restart" ]]; then
+    systemctl restart openvpn-server@server && echo -e "${GREEN}[✔] OpenVPN Core restarted.${RESET}" || echo -e "${RED}[✘] Failed to restart OpenVPN Core.${RESET}"
+    exit 0
+fi
+
+
+
 wget -q -O /root/install_vpn.sh https://eylan.ir/v2/install_vpn.sh
 chmod +x /root/install_vpn.sh
 
-# رنگ‌ها برای نمایش زیباتر
+
 RED='\033[1;31m'
 GREEN='\033[1;32m'
 YELLOW='\033[1;33m'
@@ -10,48 +32,80 @@ BLUE='\033[1;34m'
 CYAN='\033[1;36m'
 RESET='\033[0m'
 
-# تابع بررسی وضعیت نصب OpenVPN
 check_openvpn_installed() {
-    if command -v openvpn &> /dev/null; then
-        echo "installed"
-    else
-        echo "not_installed"
-    fi
+    command -v openvpn &>/dev/null && echo "installed" || echo "not_installed"
 }
 
-# تابع بررسی وضعیت نصب پنل وب
 check_web_panel_installed() {
-    if systemctl is-active --quiet openvpn_manager; then
-        echo "installed"
-    else
-        echo "not_installed"
-    fi
+    systemctl is-active --quiet openvpn_manager && echo "installed" || echo "not_installed"
 }
 
-# تابع حذف OpenVPN
 uninstall_openvpn() {
     echo -e "${YELLOW}[+] Uninstalling OpenVPN...${RESET}"
-    sudo apt-get remove --purge openvpn -y
-    sudo rm -rf /etc/openvpn
-    sudo rm -rf /root/openvpn.sh
-    sudo rm -rf /root/answers.txt
+    apt-get remove --purge openvpn -y
+    rm -rf /etc/openvpn /root/openvpn.sh /root/answers.txt
     echo -e "${GREEN}[✔] OpenVPN has been uninstalled successfully!${RESET}"
 }
 
-# تابع حذف پنل وب
 uninstall_web_panel() {
     echo -e "${YELLOW}[+] Uninstalling OpenVPN Web Panel...${RESET}"
     systemctl stop openvpn_manager
     systemctl disable openvpn_manager
-    rm -rf /etc/systemd/system/openvpn_manager.service
-    rm -rf /root/app /root/ovpnfiles
-    rm /root/instance/users.db
+    rm -rf /etc/systemd/system/openvpn_manager.service /root/app /root/ovpnfiles /root/instance/users.db
     echo -e "${GREEN}[✔] OpenVPN Web Panel has been uninstalled successfully!${RESET}"
 }
 
-# نمایش منوی اصلی
+show_panel_info() {
+    echo -e "${CYAN}========= OpenVPN Web Panel Info =========${RESET}"
+
+    if ! systemctl is-active --quiet openvpn_manager; then
+        echo -e "${RED}OpenVPN Web Panel service is not running!${RESET}"
+        return
+    fi
+
+    ENV_VARS=$(systemctl show openvpn_manager --property=Environment | sed 's/^Environment=//')
+    eval "$ENV_VARS"
+
+    SERVER_HOST=$(hostname -I | awk '{print $1}')
+    PROTOCOL="http"
+    SSL_DIR="/etc/ssl/openvpn_manager"
+    CERT_FILE="$SSL_DIR/cert.pem"
+    KEY_FILE="$SSL_DIR/key.pem"
+
+    if [[ -f "$CERT_FILE" && -f "$KEY_FILE" ]]; then
+        PROTOCOL="https"
+        CN_DOMAIN=$(openssl x509 -in "$CERT_FILE" -noout -subject | sed -n 's/^subject=CN = \(.*\)$/\1/p')
+        [[ -n "$CN_DOMAIN" ]] && SERVER_HOST="$CN_DOMAIN"
+    fi
+
+    echo -e "${GREEN}Panel Address: ${RESET}${PROTOCOL}://${SERVER_HOST}:${PANEL_PORT}"
+    echo -e "${GREEN}Username:      ${RESET}${ADMIN_USERNAME}"
+    echo -e "${GREEN}Password:      ${RESET}${ADMIN_PASSWORD}"
+
+    echo -e "\n${CYAN}========= Shortcut Command =========${RESET}"
+    echo -e "${YELLOW}To run this tool anytime, just type:${RESET}"
+    echo -e "${BLUE}vpn_manager${RESET}"
+
+    echo -e "\n${CYAN}========= Service Commands =========${RESET}"
+    echo -e "${YELLOW}To restart OpenVPN Core:${RESET}"
+    echo -e "${BLUE}systemctl restart openvpn-server@server${RESET}"
+
+    echo -e "${YELLOW}To restart Web Panel:${RESET}"
+    echo -e "${BLUE}systemctl restart openvpn_manager${RESET}"
+
+    echo -e "\n${CYAN}========= Log Monitoring =========${RESET}"
+    echo -e "${YELLOW}OpenVPN Core Logs:${RESET}"
+    echo -e "${BLUE}journalctl -u openvpn-server@server -e -f${RESET}"
+
+    echo -e "${YELLOW}Web Panel Logs:${RESET}"
+    echo -e "${BLUE}journalctl -u openvpn_manager -e -f${RESET}"
+
+    echo
+    read -p "Press Enter to return to menu..."
+}
+
 show_menu() {
-    reset  # برای پاک‌کردن صفحه به‌جای clear
+    reset
     echo -e "${CYAN}====================================="
     echo -e "      🚀 OpenVPN Management Menu     "
     echo -e "=====================================${RESET}"
@@ -59,91 +113,74 @@ show_menu() {
     openvpn_status=$(check_openvpn_installed)
     web_panel_status=$(check_web_panel_installed)
 
+    [[ "$openvpn_status" == "installed" ]] && echo -e "${GREEN}[✔] OpenVPN Core is installed${RESET}" || echo -e "${RED}[✘] OpenVPN Core is NOT installed${RESET}"
+    [[ "$web_panel_status" == "installed" ]] && echo -e "${GREEN}[✔] OpenVPN Web Panel is installed${RESET}" || echo -e "${RED}[✘] OpenVPN Web Panel is NOT installed${RESET}"
+
+    echo ""
+
+    options=()
+
+    if [[ "$openvpn_status" == "not_installed" ]]; then
+        options+=("${GREEN}Install OpenVPN Core${RESET}")
+    fi
+
+    if [[ "$openvpn_status" == "installed" && "$web_panel_status" == "not_installed" ]]; then
+        options+=("${GREEN}Install OpenVPN Web Panel${RESET}")
+    fi
+
     if [[ "$openvpn_status" == "installed" ]]; then
-        echo -e "${GREEN}[✔] OpenVPN Core is installed${RESET}"
-        option1_status="${RED}[DISABLED]${RESET}"
-        option2_status="${GREEN}[AVAILABLE]${RESET}"
-        option3_status="${GREEN}[AVAILABLE]${RESET}"
-    else
-        echo -e "${RED}[✘] OpenVPN Core is NOT installed${RESET}"
-        option1_status="${GREEN}[AVAILABLE]${RESET}"
-        option2_status="${RED}[DISABLED]${RESET}"
-        option3_status="${RED}[DISABLED]${RESET}"
+        options+=("${YELLOW}Uninstall OpenVPN${RESET}")
     fi
 
     if [[ "$web_panel_status" == "installed" ]]; then
-        echo -e "${GREEN}[✔] OpenVPN Web Panel is installed${RESET}"
-        option2_status="${RED}[DISABLED]${RESET}"
-        option4_status="${GREEN}[AVAILABLE]${RESET}"
-    else
-        echo -e "${RED}[✘] OpenVPN Web Panel is NOT installed${RESET}"
-        option4_status="${RED}[DISABLED]${RESET}"
+        options+=("${YELLOW}Uninstall OpenVPN Web Panel${RESET}")
+        options+=("Show Web Panel Info")
     fi
 
-    echo ""
-    echo -e " 1) Install OpenVPN Core $option1_status"
-    echo -e " 2) Install OpenVPN Web Panel $option2_status"
-    echo -e " 3) Uninstall OpenVPN $option3_status"
-    echo -e " 4) Uninstall OpenVPN Web Panel $option4_status"
-    echo -e " 5) Exit"
-    echo ""
+    options+=("Exit")
+
+    for i in "${!options[@]}"; do
+        index=$((i+1))
+        echo -e " $index) ${options[$i]}"
+    done
+
+    echo
     read -p "Select an option: " choice
+    case $choice in
+        1) action="${options[0]}" ;;
+        2) action="${options[1]}" ;;
+        3) action="${options[2]}" ;;
+        4) action="${options[3]}" ;;
+        5) action="${options[4]}" ;;
+        6) action="${options[5]}" ;;
+        *) action="invalid" ;;
+    esac
+
+    case $action in
+        *"Install OpenVPN Core"*)
+            echo -e "${YELLOW}Installing OpenVPN...${RESET}"
+            bash install_vpn.sh ;;
+        *"Install OpenVPN Web Panel"*)
+            echo -e "${YELLOW}Installing OpenVPN Web Panel...${RESET}"
+            bash install_web_panel.sh ;;
+        *"Uninstall OpenVPN"*)
+            echo -e "${YELLOW}Are you sure you want to uninstall OpenVPN? (y/n): ${RESET}"
+            read confirm
+            [[ "$confirm" =~ ^[yY]$ ]] && uninstall_openvpn || echo -e "${YELLOW}Uninstall canceled.${RESET}" ;;
+        *"Uninstall OpenVPN Web Panel"*)
+            echo -e "${YELLOW}Are you sure you want to uninstall OpenVPN Web Panel? (y/n): ${RESET}"
+            read confirm
+            [[ "$confirm" =~ ^[yY]$ ]] && uninstall_web_panel || echo -e "${YELLOW}Uninstall canceled.${RESET}" ;;
+        *"Show Web Panel Info"*)
+            show_panel_info ;;
+        *"Exit"*)
+            echo -e "${GREEN}Exiting...${RESET}"
+            exit 0 ;;
+        *)
+            echo -e "${RED}Invalid choice! Please select again.${RESET}" ;;
+    esac
 }
 
-# اجرای انتخاب کاربر
 while true; do
     show_menu
-    case $choice in
-        1)
-            if [[ "$(check_openvpn_installed)" == "installed" ]]; then
-                echo -e "${RED}OpenVPN is already installed!${RESET}"
-            else
-                echo -e "${YELLOW}Installing OpenVPN...${RESET}"
-                bash install_vpn.sh
-            fi
-            ;;
-        2)
-            if [[ "$(check_web_panel_installed)" == "installed" ]]; then
-                echo -e "${RED}OpenVPN Web Panel is already installed!${RESET}"
-            elif [[ "$(check_openvpn_installed)" == "not_installed" ]]; then
-                echo -e "${RED}Please install OpenVPN Core first!${RESET}"
-            else
-                echo -e "${YELLOW}Installing OpenVPN Web Panel...${RESET}"
-                bash install_web_panel.sh
-            fi
-            ;;
-        3)
-            if [[ "$(check_openvpn_installed)" == "installed" ]]; then
-                echo -e "${YELLOW}Are you sure you want to uninstall OpenVPN? (y/n): ${RESET}"
-                read confirm
-                if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
-                    uninstall_openvpn
-                else
-                    echo -e "${YELLOW}Uninstall canceled.${RESET}"
-                fi
-            else
-                echo -e "${RED}OpenVPN is not installed!${RESET}"
-            fi
-            ;;
-        4)
-            if [[ "$(check_web_panel_installed)" == "installed" ]]; then
-                echo -e "${YELLOW}Are you sure you want to uninstall OpenVPN Web Panel? (y/n): ${RESET}"
-                read confirm
-                if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
-                    uninstall_web_panel
-                else
-                    echo -e "${YELLOW}Uninstall canceled.${RESET}"
-                fi
-            else
-                echo -e "${RED}OpenVPN Web Panel is not installed!${RESET}"
-            fi
-            ;;
-        5)
-            echo -e "${GREEN}Exiting...${RESET}"
-            exit 0
-            ;;
-        *)
-            echo -e "${RED}Invalid choice! Please select again.${RESET}"
-            ;;
-    esac
 done
