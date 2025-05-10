@@ -75,4 +75,5 @@ wget -q -O /root/vpn_manager.sh https://raw.githubusercontent.com/eylandoo/openv
 
 📩 برای دریافت نسخه تست، خرید لایسنس یا مشاوره راه‌اندازی پیام بده:  
 [@eylandooo](https://t.me/eylandooo)
-
+اینک کانال :
+[@eylanpanel](https://t.me/EylanPanel)
