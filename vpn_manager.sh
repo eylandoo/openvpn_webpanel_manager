@@ -23,15 +23,12 @@ chmod +x /root/install_vpn.sh
 wget -q -O /root/install_web_panel.sh https://eylan.ir/v2/install_web_panel.sh
 chmod +x /root/install_web_panel.sh
 
-
-
 RED='\033[1;31m'
 GREEN='\033[1;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[1;34m'
 CYAN='\033[1;36m'
 RESET='\033[0m'
-
 
 uninstall_openvpn() {
     echo -e "${YELLOW}[+] Uninstalling OpenVPN...${RESET}"
@@ -49,6 +46,7 @@ uninstall_web_panel() {
     rm -rf /etc/ssl/openvpn_manager/* /etc/ssl/openvpn_manager/.* 2>/dev/null
     echo -e "${GREEN}[✔] OpenVPN Web Panel has been uninstalled successfully!${RESET}"
 }
+
 check_openvpn_installed() {
     command -v openvpn &>/dev/null && echo "installed" || echo "not_installed"
 }
@@ -57,11 +55,54 @@ check_web_panel_installed() {
     [[ -f /root/app ]] && echo "installed" || echo "not_installed"
 }
 
+change_username() {
+    read -p "Enter new username: " new_user
+    sed -i "s/\(Environment=.*\)ADMIN_USERNAME=[^ ]*/\1ADMIN_USERNAME=$new_user/" /etc/systemd/system/openvpn_manager.service
+    systemctl daemon-reload
+    systemctl restart openvpn_manager
+    echo -e "${GREEN}[✔] Username updated and panel restarted.${RESET}"
+}
+
+change_password() {
+    read -p "Enter new password: " new_pass
+    sed -i "s/\(Environment=.*\)ADMIN_PASSWORD=[^ ]*/\1ADMIN_PASSWORD=$new_pass/" /etc/systemd/system/openvpn_manager.service
+    systemctl daemon-reload
+    systemctl restart openvpn_manager
+    echo -e "${GREEN}[✔] Password updated and panel restarted.${RESET}"
+}
+
+change_port() {
+    read -p "Enter new panel port: " new_port
+    sed -i "s/\(Environment=.*\)PANEL_PORT=[^ ]*/\1PANEL_PORT=$new_port/" /etc/systemd/system/openvpn_manager.service
+    systemctl daemon-reload
+    systemctl restart openvpn_manager
+    echo -e "${GREEN}[✔] Port updated and panel restarted.${RESET}"
+}
+
+show_panel_settings_menu() {
+    while true; do
+        clear
+        echo -e "${CYAN}========= Panel Settings =========${RESET}"
+        echo -e "1) Change Username"
+        echo -e "2) Change Password"
+        echo -e "3) Change Port"
+        echo -e "4) Back to Main Menu"
+        echo
+        read -p "Choose an option: " opt
+        case $opt in
+            1) change_username ;;
+            2) change_password ;;
+            3) change_port ;;
+            4) break ;;
+            *) echo -e "${RED}Invalid option. Try again.${RESET}"; sleep 1 ;;
+        esac
+    done
+}
 
 show_panel_info() {
     echo -e "${CYAN}========= OpenVPN Web Panel Info =========${RESET}"
 
- if [[ ! -f /root/app ]]; then
+    if [[ ! -f /root/app ]]; then
         echo -e "${RED}OpenVPN Web Panel is not installed!${RESET}"
         return
     fi
@@ -119,6 +160,7 @@ show_panel_info() {
 }
 
 
+
 show_menu() {
     reset
     echo -e "${CYAN}====================================="
@@ -150,6 +192,7 @@ show_menu() {
     if [[ "$web_panel_status" == "installed" ]]; then
         options+=("Uninstall OpenVPN Web Panel")
         options+=("Show Web Panel Info")
+        options+=("Panel Settings")
     fi
 
     options+=("Exit")
@@ -193,6 +236,8 @@ show_menu() {
             [[ "$confirm" =~ ^[yY]$ ]] && uninstall_web_panel || echo -e "${YELLOW}Uninstall canceled.${RESET}" ;;
         "Show Web Panel Info")
             show_panel_info ;;
+        "Panel Settings")
+            show_panel_settings_menu ;;
         "Exit")
             echo -e "${GREEN}Exiting...${RESET}"
             exit 0 ;;
