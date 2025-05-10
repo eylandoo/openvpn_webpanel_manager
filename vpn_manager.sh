@@ -52,6 +52,58 @@ check_web_panel_installed() {
     systemctl is-active --quiet openvpn_manager && echo "installed" || echo "not_installed"
 }
 
+
+show_panel_info() {
+    echo -e "${CYAN}========= OpenVPN Web Panel Info =========${RESET}"
+
+    if ! systemctl is-active --quiet openvpn_manager; then
+        echo -e "${RED}OpenVPN Web Panel service is not running!${RESET}"
+        return
+    fi
+
+    ENV_VARS=$(systemctl show openvpn_manager --property=Environment | sed 's/^Environment=//')
+    eval "$ENV_VARS"
+
+    SERVER_HOST=$(hostname -I | awk '{print $1}')
+    PROTOCOL="http"
+    SSL_DIR="/etc/ssl/openvpn_manager"
+    CERT_FILE="$SSL_DIR/cert.pem"
+    KEY_FILE="$SSL_DIR/key.pem"
+
+    if [[ -f "$CERT_FILE" && -f "$KEY_FILE" ]]; then
+        PROTOCOL="https"
+        CN_DOMAIN=$(openssl x509 -in "$CERT_FILE" -noout -subject | sed -n 's/^subject=CN = \(.*\)$/\1/p')
+        [[ -n "$CN_DOMAIN" ]] && SERVER_HOST="$CN_DOMAIN"
+    fi
+
+    echo -e "${GREEN}Panel Address: ${RESET}${PROTOCOL}://${SERVER_HOST}:${PANEL_PORT}"
+    echo -e "${GREEN}Username:      ${RESET}${ADMIN_USERNAME}"
+    echo -e "${GREEN}Password:      ${RESET}${ADMIN_PASSWORD}"
+
+    echo -e "\n${CYAN}========= Shortcut Command =========${RESET}"
+    echo -e "${YELLOW}To run this tool anytime, just type:${RESET}"
+    echo -e "${BLUE}vpn_manager${RESET}"
+
+    echo -e "\n${CYAN}========= Service Commands =========${RESET}"
+    echo -e "${YELLOW}To restart OpenVPN Core:${RESET}"
+    echo -e "${BLUE}systemctl restart openvpn-server@server${RESET}"
+
+    echo -e "${YELLOW}To restart Web Panel:${RESET}"
+    echo -e "${BLUE}systemctl restart openvpn_manager${RESET}"
+
+
+
+    echo -e "\n${CYAN}========= Log Monitoring =========${RESET}"
+    echo -e "${YELLOW}OpenVPN Core Logs:${RESET}"
+    echo -e "${BLUE}journalctl -u openvpn-server@server -e -f${RESET}"
+
+    echo -e "${YELLOW}Web Panel Logs:${RESET}"
+    echo -e "${BLUE}journalctl -u openvpn_manager -e -f${RESET}"
+
+    echo
+    read -p "Press Enter to return to menu..."
+}
+
 show_menu() {
     reset
     echo -e "${CYAN}====================================="
