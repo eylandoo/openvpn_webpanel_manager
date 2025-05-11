@@ -191,7 +191,7 @@ configure_kharej_server() {
             continue
         fi
 
-        read -p "Enter remote server  iran address with port tunnel  (e.g. 1.2.3.4:6644): " REMOTE_ADDR
+        read -p "Enter remote server iran address with port tunnel  (e.g. 1.2.3.4:6644): " REMOTE_ADDR
         read -p "Enter tunnel token (authentication): " TUNNEL_TOKEN
 
         WEB_PORT=$(get_next_web_port)
