@@ -83,7 +83,7 @@ wget -q -O /root/update_app.sh https://eylan.ir/v2/update_app.sh && chmod +x /ro
 ## 🔄 اجرای تانل
 
 - ابتدا در سرور ایران زده شود و بعد در سرور خارج    در نهایت ip یا دامین ایران را در تنظیمات پنل در تب server setting  وارد کنید 
-
+```bash
 wget -q -O /root/backhaul.sh https://raw.githubusercontent.com/eylandoo/openvpn_webpanel_manager/main/backhaul.sh && chmod +x /root/backhaul.sh && /root/backhaul.sh
 ```
 
