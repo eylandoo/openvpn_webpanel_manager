@@ -68,12 +68,14 @@ install_backhaul() {
     if [[ -f "$BACKHAUL_BIN" ]]; then
         echo -e "\n${GREEN}[✔] Backhaul is already installed at $BACKHAUL_BIN${RESET}\n"
         sleep 2
+        read -p "Press Enter to return to the main menu..." dummy
         return
     fi
     echo -e "\n${YELLOW}[+] Downloading Backhaul core...${RESET}"
     wget -q "$BACKHAUL_URL" -O "$BACKHAUL_ARCHIVE" || {
         echo -e "${RED}[✘] Failed to download Backhaul.${RESET}"
         sleep 2
+        read -p "Press Enter to return to the main menu..." dummy
         return
     }
     echo -e "${YELLOW}[+] Extracting...${RESET}"
@@ -81,8 +83,11 @@ install_backhaul() {
     chmod +x backhaul
     mv backhaul "$BACKHAUL_BIN"
     echo -e "\n${GREEN}🎉 Backhaul successfully installed! Location: $BACKHAUL_BIN${RESET}\n"
+    rm -f "$BACKHAUL_ARCHIVE"
     sleep 3
+    read -p "Press Enter to return to the main menu..." dummy
 }
+
 
 configure_iran_server() {
     while true; do
