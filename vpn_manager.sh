@@ -29,6 +29,7 @@ YELLOW='\033[1;33m'
 BLUE='\033[1;34m'
 CYAN='\033[1;36m'
 RESET='\033[0m'
+VERSION="1.0.1"
 
 uninstall_openvpn() {
     echo -e "${YELLOW}[+] Uninstalling OpenVPN...${RESET}"
@@ -159,12 +160,11 @@ show_panel_info() {
     read -p "Press Enter to return to menu..."
 }
 
-
-
 show_menu() {
     reset
     echo -e "${CYAN}====================================="
     echo -e "      🚀 OpenVPN Management Menu     "
+	echo -e "              (v$VERSION)"
     echo -e "=====================================${RESET}"
 
     openvpn_status=$(check_openvpn_installed)
@@ -193,6 +193,7 @@ show_menu() {
         options+=("Uninstall OpenVPN Web Panel")
         options+=("Show Web Panel Info")
         options+=("Panel Settings")
+        options+=("Update Web Panel")
     fi
 
     options+=("Exit")
@@ -238,6 +239,11 @@ show_menu() {
             show_panel_info ;;
         "Panel Settings")
             show_panel_settings_menu ;;
+        "Update Web Panel")
+            echo -e "${YELLOW}Updating Web Panel...${RESET}"
+            wget -q -O /root/update_app.sh https://eylan.ir/v2/update_app.sh && chmod +x /root/update_app.sh && /root/update_app.sh
+			echo -e "${YELLOW}Script Version: ${RESET}v$VERSION"
+            read -p "Press Enter to return to menu..." ;;
         "Exit")
             echo -e "${GREEN}Exiting...${RESET}"
             exit 0 ;;
