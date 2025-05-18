@@ -1,5 +1,15 @@
 #!/bin/bash
 
+OS_VERSION=$(lsb_release -rs)
+ARCHITECTURE=$(uname -m)
+
+if [[ "$OS_VERSION" != "22.04" || "$ARCHITECTURE" != "x86_64" ]]; then
+    echo -e "\033[1;31m[✘] This installer only supports Ubuntu 22.04 with x86_64 architecture.\033[0m"
+    echo -e "\033[1;33m    Your system: Ubuntu $OS_VERSION - Architecture: $ARCHITECTURE\033[0m"
+    exit 1
+fi
+
+
 stty erase ^? 2>/dev/null
 
 if [[ "$1" == "panel" && "$2" == "restart" ]]; then
