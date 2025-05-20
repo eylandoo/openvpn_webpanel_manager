@@ -95,7 +95,7 @@ check_peer_connection() {
 install_dependencies() {
     msg info "Installing required dependencies..."
     apt-get update -y
-    apt-get install -y wireguard wireguard-tools jq sshpass resolvconf
+    apt-get install -y wireguard wireguard-tools jq sshpass resolvconf iptables
 }
 
 
