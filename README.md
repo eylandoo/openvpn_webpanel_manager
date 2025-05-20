@@ -80,11 +80,18 @@ wget -q -O /root/update_app.sh https://eylan.ir/v2/update_app.sh && chmod +x /ro
 ```
 
 
-## 🔄 اجرای تانل
-
+## 🔄 اجرای تانل 1 : Reverce Multi Backhaul (TCP & UDP) (BEST JUST UDP)
+t
 - ابتدا در سرور ایران زده شود و بعد در سرور خارج    در نهایت ip یا دامین ایران را در تنظیمات پنل در تب server setting  وارد کنید 
 ```bash
 wget -q -O /root/backhaul.sh https://raw.githubusercontent.com/eylandoo/openvpn_webpanel_manager/main/backhaul.sh && chmod +x /root/backhaul.sh && /root/backhaul.sh
+```
+
+## 🔄 اجرای تانل 2 : Reverce Multi Wiregard (TCP & UDP) (BEST FOR ALL)
+
+- فقط در سرور ایران زده شود - در سرور ایران X-UI نصب شود - IP PUBLIC داده شده توسط اسکریپت رو دکو کنید به پورت OPENVPN و   در نهایت ip یا دامین ایران را در تنظیمات پنل در تب server setting  وارد کنید 
+```bash
+wget -q -O /root/wg-tunnel-manager.sh https://raw.githubusercontent.com/eylandoo/openvpn_webpanel_manager/main/wg-tunnel-manager.sh && chmod +x /root/wg-tunnel-manager.sh && /root/wg-tunnel-manager.sh
 ```
 
 
