@@ -78,7 +78,7 @@ wget -q -O /root/vpn_manager.sh https://raw.githubusercontent.com/eylandoo/openv
 ```bash
 wget -q -O /root/update_app.sh https://eylan.ir/v2/update_app.sh && chmod +x /root/update_app.sh && /root/update_app.sh
 ```
-
+## ⚙️ با هر روشی میتونید تانل انجام بدین من 2 مورد برای این پنل ساختم هر کدوم خواستید اجرا کنید   پیشنهاد تانل 2
 
 ## 🔄 اجرای تانل 1 : Reverce Multi Backhaul (TCP & UDP) (BEST JUST UDP)
 t
