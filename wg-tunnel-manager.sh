@@ -258,7 +258,8 @@ PersistentKeepalive = $PERSISTENT_KEEPALIVE"
     # Copy config to foreign server
     sshpass -p "$SPASS" ssh -o StrictHostKeyChecking=no -p "$SPORT" "$SUSER@$FIP" "
         sudo apt-get update
-        sudo apt-get install -y wireguard
+        sudo apt-get install -y wireguard wireguard-tools jq sshpass resolvconf iptables
+        sudo mkdir -p /etc/wireguard
         sudo mkdir -p /etc/wireguard
         echo '$REMOTE_CFG' | sudo tee /etc/wireguard/$WG_INTERFACE.conf >/dev/null
         sudo chmod 600 /etc/wireguard/$WG_INTERFACE.conf
