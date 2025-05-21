@@ -21,13 +21,6 @@ DEFAULT_SSH_PORT="22"
 DEFAULT_SSH_USER="root"
 IRAN_PUBLIC_IP_FILE="/etc/wireguard/iran_public_ip.txt"
 
-# DNS Settings - Improved with multiple fallback servers
-PRIMARY_DNS="8.8.8.8"
-SECONDARY_DNS="1.1.1.1"
-TERTIARY_DNS="9.9.9.9"
-DNS_SETTINGS="$PRIMARY_DNS, $SECONDARY_DNS"
-
-
 # ==============================================
 # Initialize system
 # ==============================================
@@ -55,22 +48,6 @@ msg() {
 init_filesystem() {
     mkdir -p "$CONFIG_BACKUP_DIR"
     [[ ! -f "$PEERS_FILE" ]] && echo '[]' > "$PEERS_FILE"
-}
-
-
-
-fix_dns_if_broken() {
-    current_dns=$(grep -E '^nameserver' /etc/resolv.conf | head -n 1 | awk '{print $2}')
-    if [[ -z "$current_dns" || "$current_dns" == "127.0.0.53" ]]; then
-        echo -e "${YELLOW}⚠ DNS seems broken or set to local stub — fixing...${NC}"
-        chattr -i /etc/resolv.conf 2>/dev/null || true
-        echo "nameserver 8.8.8.8" > /etc/resolv.conf
-        echo "nameserver 8.8.4.4" >> /etc/resolv.conf
-        chattr +i /etc/resolv.conf
-        echo -e "${GREEN}✓ DNS reset to 8.8.8.8 and 8.8.4.4 and locked${NC}"
-    else
-        echo -e "${BLUE}ℹ DNS looks fine: $current_dns${NC}"
-    fi
 }
 
 # ==============================================
@@ -118,7 +95,7 @@ check_peer_connection() {
 install_dependencies() {
     msg info "Installing required dependencies..."
     apt-get update -y
-    apt-get install -y wireguard wireguard-tools jq sshpass iptables
+    apt-get install -y wireguard wireguard-tools jq sshpass resolvconf iptables
 }
 
 
@@ -191,36 +168,36 @@ install_iran_server() {
 
     msg info "Configuring Iran server..."
 
-    # Detect default network interface
+    # تشخیص اینترفیس خروجی (مثلاً eth0, ens3, venet0, ...)
     DEFAULT_IFACE=$(ip route get 1 | awk '{print $5; exit}')
     if [[ -z "$DEFAULT_IFACE" ]]; then
         msg error "Could not detect default network interface!"
         exit 1
     fi
 
-    # Cleanup previous configuration if exists
+    # حذف باقی‌مانده قبلی اگر وجود داشت
     systemctl stop wg-quick@$WG_INTERFACE 2>/dev/null || true
     ip link del $WG_INTERFACE 2>/dev/null || true
 
-    # Generate keys
+    # تولید کلید خصوصی و عمومی
     PRIVATE_KEY=$(wg genkey)
     PUBLIC_KEY=$(echo "$PRIVATE_KEY" | wg pubkey)
 
-    # Create WireGuard config file with improved DNS settings
+    # ساخت فایل کانفیگ WireGuard
     cat > "/etc/wireguard/$WG_INTERFACE.conf" <<EOF
 [Interface]
 Address = $IRAN_IP/24
 ListenPort = $WG_PORT
 PrivateKey = $PRIVATE_KEY
 MTU = $MTU_SIZE
-DNS = $DNS_SETTINGS
-PostUp = iptables -A FORWARD -i $WG_INTERFACE -j ACCEPT; iptables -t nat -A POSTROUTING -o $DEFAULT_IFACE -j MASQUERADE; printf "nameserver $PRIMARY_DNS\nnameserver $SECONDARY_DNS\nnameserver $TERTIARY_DNS\n" > /etc/resolv.conf; chattr +i /etc/resolv.conf 2>/dev/null || true
-PostDown = iptables -D FORWARD -i $WG_INTERFACE -j ACCEPT; iptables -t nat -D POSTROUTING -o $DEFAULT_IFACE -j MASQUERADE; chattr -i /etc/resolv.conf 2>/dev/null || true
+DNS = 8.8.8.8
+PostUp = iptables -A FORWARD -i $WG_INTERFACE -j ACCEPT; iptables -t nat -A POSTROUTING -o $DEFAULT_IFACE -j MASQUERADE
+PostDown = iptables -D FORWARD -i $WG_INTERFACE -j ACCEPT; iptables -t nat -D POSTROUTING -o $DEFAULT_IFACE -j MASQUERADE
 EOF
 
     chmod 600 /etc/wireguard/$WG_INTERFACE.conf
 
-    # Enable and start service
+    # فعال‌سازی و راه‌اندازی سرویس
     systemctl enable --now wg-quick@$WG_INTERFACE >/dev/null 2>&1
 
     if systemctl is-active --quiet wg-quick@$WG_INTERFACE; then
@@ -230,7 +207,7 @@ EOF
         exit 1
     fi
 
-    # Add firewall rule if not exists
+    # افزودن rule فایروال فقط اگر وجود نداشته باشد
     if ! iptables -C INPUT -p udp --dport $WG_PORT -j ACCEPT 2>/dev/null; then
         iptables -A INPUT -p udp --dport $WG_PORT -j ACCEPT
     fi
@@ -261,10 +238,10 @@ add_foreign_server() {
     local IRAN_PUB=$(wg show $WG_INTERFACE public-key)
     local IRAN_PUBLIC_IP=$(cat "$IRAN_PUBLIC_IP_FILE")
 
-    # Detect default interface
+    # پیدا کردن اینترفیس خروجی ایران به‌صورت اتومات
     local DEFAULT_IFACE=$(ip route get 1 | awk '{print $5; exit}')
 
-    # Add to peers file
+    # افزودن به فایل peers
     jq ". += [{
         \"ip\": \"$FOREIGN_IP\",
         \"public_ip\": \"$FIP\",
@@ -275,16 +252,16 @@ add_foreign_server() {
         \"added_at\": \"$(date +%Y-%m-%dT%H:%M:%S)\"
     }]" "$PEERS_FILE" > tmp.json && mv tmp.json "$PEERS_FILE"
 
-    # Add to Iran config
+    # افزودن به کانفیگ ایران
     wg set $WG_INTERFACE peer "$PUBKEY" allowed-ips "$FOREIGN_IP/32" persistent-keepalive $PERSISTENT_KEEPALIVE preshared-key <(echo "$PSK")
 
-    # Create remote config with improved DNS settings
+    # ساخت فایل کانفیگ ریموت
     local REMOTE_CFG="[Interface]
 Address = $FOREIGN_IP/24
 PrivateKey = $PKEY
 ListenPort = $WG_PORT
 MTU = $MTU_SIZE
-DNS = $DNS_SETTINGS
+DNS = 8.8.8.8
 
 [Peer]
 PublicKey = $IRAN_PUB
@@ -293,31 +270,23 @@ AllowedIPs = $IRAN_IP/32
 Endpoint = $IRAN_PUBLIC_IP:$WG_PORT
 PersistentKeepalive = $PERSISTENT_KEEPALIVE"
 
-    # Install on foreign server with DNS fixes
+    # نصب کامل روی سرور خارجی
     sshpass -p "$SPASS" ssh -o StrictHostKeyChecking=no -p "$SPORT" "$SUSER@$FIP" "
         sudo apt-get update
-        sudo apt-get install -y wireguard wireguard-tools jq sshpass resolvconf iptables dnsutils
+        sudo apt-get install -y wireguard wireguard-tools jq sshpass resolvconf iptables
 
-        # Cleanup previous config if exists
+        # حذف رابط قبلی اگر وجود داشت
         sudo systemctl stop wg-quick@wg1 2>/dev/null || true
         sudo ip link del wg1 2>/dev/null || true
 
-        # Create config and start service
+        # ساخت کانفیگ و راه‌اندازی
         sudo mkdir -p /etc/wireguard
         echo '$REMOTE_CFG' | sudo tee /etc/wireguard/wg1.conf >/dev/null
         sudo chmod 600 /etc/wireguard/wg1.conf
-        
-        # Fix DNS settings
-        sudo systemctl stop systemd-resolved 2>/dev/null || true
-        sudo systemctl disable systemd-resolved 2>/dev/null || true
-        printf \"nameserver $PRIMARY_DNS\nnameserver $SECONDARY_DNS\nnameserver $TERTIARY_DNS\n\" | sudo tee /etc/resolv.conf >/dev/null
-        sudo chattr +i /etc/resolv.conf 2>/dev/null || true
-        
         sudo systemctl enable wg-quick@wg1
         sudo wg-quick up wg1
     " && msg success "Foreign server configured successfully" || msg error "Failed to configure foreign server"
 }
-
 
 list_foreign_servers() {
     if [[ ! -f "$PEERS_FILE" ]] || [[ $(jq length "$PEERS_FILE") -eq 0 ]]; then
