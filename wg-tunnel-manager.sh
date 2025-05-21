@@ -50,6 +50,22 @@ init_filesystem() {
     [[ ! -f "$PEERS_FILE" ]] && echo '[]' > "$PEERS_FILE"
 }
 
+
+
+fix_dns_if_broken() {
+    current_dns=$(grep -E '^nameserver' /etc/resolv.conf | head -n 1 | awk '{print $2}')
+    if [[ -z "$current_dns" || "$current_dns" == "127.0.0.53" ]]; then
+        echo -e "${YELLOW}⚠ DNS seems broken or set to local stub — fixing...${NC}"
+        chattr -i /etc/resolv.conf 2>/dev/null || true
+        echo "nameserver 8.8.8.8" > /etc/resolv.conf
+        echo "nameserver 8.8.4.4" >> /etc/resolv.conf
+        chattr +i /etc/resolv.conf
+        echo -e "${GREEN}✓ DNS reset to 8.8.8.8 and 8.8.4.4 and locked${NC}"
+    else
+        echo -e "${BLUE}ℹ DNS looks fine: $current_dns${NC}"
+    fi
+}
+
 # ==============================================
 # Status checking functions
 # ==============================================
@@ -193,6 +209,8 @@ EOF
     chmod 600 /etc/wireguard/$WG_INTERFACE.conf
 
     systemctl enable --now wg-quick@$WG_INTERFACE >/dev/null 2>&1
+    fix_dns_if_broken
+
 
     if systemctl is-active --quiet wg-quick@$WG_INTERFACE; then
         msg success "Iran WireGuard interface started successfully on $IRAN_IP"
