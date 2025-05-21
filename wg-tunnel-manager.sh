@@ -95,7 +95,7 @@ check_peer_connection() {
 install_dependencies() {
     msg info "Installing required dependencies..."
     apt-get update -y
-    apt-get install -y wireguard wireguard-tools jq sshpass resolvconf iptables
+    apt-get install -y wireguard wireguard-tools jq sshpass iptables
 }
 
 
@@ -161,43 +161,37 @@ echo -e "${CYAN}└───────────────┴────�
 # ==============================================
 
 install_iran_server() {
-    if is_iran_installed; then
+    if [[ -f "/etc/wireguard/$WG_INTERFACE.conf" ]]; then
         msg info "Iran server is already installed!"
         return
     fi
 
     msg info "Configuring Iran server..."
 
-    # تشخیص اینترفیس خروجی (مثلاً eth0, ens3, venet0, ...)
     DEFAULT_IFACE=$(ip route get 1 | awk '{print $5; exit}')
     if [[ -z "$DEFAULT_IFACE" ]]; then
         msg error "Could not detect default network interface!"
         exit 1
     fi
 
-    # حذف باقی‌مانده قبلی اگر وجود داشت
     systemctl stop wg-quick@$WG_INTERFACE 2>/dev/null || true
     ip link del $WG_INTERFACE 2>/dev/null || true
 
-    # تولید کلید خصوصی و عمومی
     PRIVATE_KEY=$(wg genkey)
     PUBLIC_KEY=$(echo "$PRIVATE_KEY" | wg pubkey)
 
-    # ساخت فایل کانفیگ WireGuard
     cat > "/etc/wireguard/$WG_INTERFACE.conf" <<EOF
 [Interface]
 Address = $IRAN_IP/24
 ListenPort = $WG_PORT
 PrivateKey = $PRIVATE_KEY
 MTU = $MTU_SIZE
-DNS = 8.8.8.8
 PostUp = iptables -A FORWARD -i $WG_INTERFACE -j ACCEPT; iptables -t nat -A POSTROUTING -o $DEFAULT_IFACE -j MASQUERADE
 PostDown = iptables -D FORWARD -i $WG_INTERFACE -j ACCEPT; iptables -t nat -D POSTROUTING -o $DEFAULT_IFACE -j MASQUERADE
 EOF
 
     chmod 600 /etc/wireguard/$WG_INTERFACE.conf
 
-    # فعال‌سازی و راه‌اندازی سرویس
     systemctl enable --now wg-quick@$WG_INTERFACE >/dev/null 2>&1
 
     if systemctl is-active --quiet wg-quick@$WG_INTERFACE; then
@@ -207,7 +201,6 @@ EOF
         exit 1
     fi
 
-    # افزودن rule فایروال فقط اگر وجود نداشته باشد
     if ! iptables -C INPUT -p udp --dport $WG_PORT -j ACCEPT 2>/dev/null; then
         iptables -A INPUT -p udp --dport $WG_PORT -j ACCEPT
     fi
@@ -217,7 +210,7 @@ EOF
 }
 
 add_foreign_server() {
-    if ! is_iran_installed; then
+    if [[ ! -f "/etc/wireguard/$WG_INTERFACE.conf" ]]; then
         msg error "Iran server must be installed first!"
         return 1
     fi
@@ -237,31 +230,17 @@ add_foreign_server() {
     local PSK=$(wg genpsk)
     local IRAN_PUB=$(wg show $WG_INTERFACE public-key)
     local IRAN_PUBLIC_IP=$(cat "$IRAN_PUBLIC_IP_FILE")
-
-    # پیدا کردن اینترفیس خروجی ایران به‌صورت اتومات
     local DEFAULT_IFACE=$(ip route get 1 | awk '{print $5; exit}')
 
-    # افزودن به فایل peers
-    jq ". += [{
-        \"ip\": \"$FOREIGN_IP\",
-        \"public_ip\": \"$FIP\",
-        \"ssh_port\": \"$SPORT\",
-        \"ssh_user\": \"$SUSER\",
-        \"pubkey\": \"$PUBKEY\",
-        \"psk\": \"$PSK\",
-        \"added_at\": \"$(date +%Y-%m-%dT%H:%M:%S)\"
-    }]" "$PEERS_FILE" > tmp.json && mv tmp.json "$PEERS_FILE"
+    jq ". += [{\"ip\": \"$FOREIGN_IP\",\"public_ip\": \"$FIP\",\"ssh_port\": \"$SPORT\",\"ssh_user\": \"$SUSER\",\"pubkey\": \"$PUBKEY\",\"psk\": \"$PSK\",\"added_at\": \"$(date +%Y-%m-%dT%H:%M:%S)\"}]" "$PEERS_FILE" > tmp.json && mv tmp.json "$PEERS_FILE"
 
-    # افزودن به کانفیگ ایران
     wg set $WG_INTERFACE peer "$PUBKEY" allowed-ips "$FOREIGN_IP/32" persistent-keepalive $PERSISTENT_KEEPALIVE preshared-key <(echo "$PSK")
 
-    # ساخت فایل کانفیگ ریموت
     local REMOTE_CFG="[Interface]
 Address = $FOREIGN_IP/24
 PrivateKey = $PKEY
 ListenPort = $WG_PORT
 MTU = $MTU_SIZE
-DNS = 8.8.8.8
 
 [Peer]
 PublicKey = $IRAN_PUB
@@ -270,23 +249,18 @@ AllowedIPs = $IRAN_IP/32
 Endpoint = $IRAN_PUBLIC_IP:$WG_PORT
 PersistentKeepalive = $PERSISTENT_KEEPALIVE"
 
-    # نصب کامل روی سرور خارجی
     sshpass -p "$SPASS" ssh -o StrictHostKeyChecking=no -p "$SPORT" "$SUSER@$FIP" "
         sudo apt-get update
-        sudo apt-get install -y wireguard wireguard-tools jq sshpass resolvconf iptables
-
-        # حذف رابط قبلی اگر وجود داشت
+        sudo apt-get install -y wireguard wireguard-tools jq sshpass iptables
         sudo systemctl stop wg-quick@wg1 2>/dev/null || true
         sudo ip link del wg1 2>/dev/null || true
-
-        # ساخت کانفیگ و راه‌اندازی
-        sudo mkdir -p /etc/wireguard
         echo '$REMOTE_CFG' | sudo tee /etc/wireguard/wg1.conf >/dev/null
         sudo chmod 600 /etc/wireguard/wg1.conf
         sudo systemctl enable wg-quick@wg1
         sudo wg-quick up wg1
     " && msg success "Foreign server configured successfully" || msg error "Failed to configure foreign server"
 }
+
 
 list_foreign_servers() {
     if [[ ! -f "$PEERS_FILE" ]] || [[ $(jq length "$PEERS_FILE") -eq 0 ]]; then
