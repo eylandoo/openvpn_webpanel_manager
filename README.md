@@ -1,4 +1,4 @@
-# 🌐 پنل مدیریت OpenVPN – مدیریت حرفه‌ای کاربران و سرورها
+6# 🌐 پنل مدیریت OpenVPN – مدیریت حرفه‌ای کاربران و سرورها
 
 یک پنل قدرتمند برای مدیریت کامل OpenVPN، مناسب برای ارائه‌دهندگان سرویس VPN  
 بدون نیاز به نصب Agent، با طراحی مدرن، پشتیبانی از چند نود، و داشبورد زنده.
@@ -91,7 +91,13 @@ wget -q -O /root/backhaul.sh https://raw.githubusercontent.com/eylandoo/openvpn_
 
 ## 🔄 اجرای تانل 2 : Reverce Multi Wiregard (TCP & UDP) (BEST FOR ALL)
 
-- فقط در سرور ایران زده شود - در سرور ایران X-UI نصب شود - IP PUBLIC داده شده توسط اسکریپت رو دکو کنید به پورت OPENVPN و   در نهایت ip یا دامین ایران را در تنظیمات پنل در تب server setting  وارد کنید 
+- اجرای تانل (ریورس وایرگارد مولتی سرور) UDP & TCP
+
+تمامی مراحل فقط در سرور ایران انجام می شود .
+ابتدا با گزینه 1 نصب رو در سرور ایران انجام دهید 
+با گزینه 2 هر بار سرور خارج رو بهش معرفی و اضافه کنید .
+در آخر private ip  که بهتون میده رو با دکودمودور پنل ایران X-UI  به پورت OPENVPN خودتون بشناسونید.
+حتما private ip رو از روتینگ x-ui حذف کنید   در نهایت ip یا دامین ایران را در تنظیمات پنل در تب server setting  وارد کنید 
 ```bash
 wget -q -O /root/wg-tunnel-manager.sh https://raw.githubusercontent.com/eylandoo/openvpn_webpanel_manager/main/wg-tunnel-manager.sh && chmod +x /root/wg-tunnel-manager.sh && /root/wg-tunnel-manager.sh
 ```
