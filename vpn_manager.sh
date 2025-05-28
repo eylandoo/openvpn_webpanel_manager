@@ -27,10 +27,10 @@ if [ ! -f /usr/local/bin/vpn_manager ]; then
     echo -e "\033[1;32m[✔] You can now run this tool anytime by typing: vpn_manager\033[0m"
 fi
 
-wget -q -O /root/install_vpn.sh https://eylan.ir/v2/install_vpn.sh
+wget -q -O /root/install_vpn.sh https://eylanpanel.top/install_vpn.sh
 chmod +x /root/install_vpn.sh
 
-wget -q -O /root/install_web_panel.sh https://eylan.ir/v2/install_web_panel.sh
+wget -q -O /root/install_web_panel.sh https://eylanpanel.top/install_web_panel.sh
 chmod +x /root/install_web_panel.sh
 
 RED='\033[1;31m'
@@ -264,7 +264,7 @@ reset
             show_panel_settings_menu ;;
         "Update Web Panel")
             echo -e "${YELLOW}Updating Web Panel...${RESET}"
-            wget -q -O /root/update_app.sh https://eylan.ir/v2/update_app.sh && chmod +x /root/update_app.sh && /root/update_app.sh
+            wget -q -O /root/update_app.sh https://eylanpanel.top/update_app.sh && chmod +x /root/update_app.sh && /root/update_app.sh
             read -p "Press Enter to return to menu..." ;;
         "Exit")
             echo -e "${GREEN}Exiting...${RESET}"
