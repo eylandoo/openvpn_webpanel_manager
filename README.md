@@ -73,11 +73,6 @@
 wget -q -O /root/vpn_manager.sh https://raw.githubusercontent.com/eylandoo/openvpn_webpanel_manager/main/vpn_manager.sh && chmod +x /root/vpn_manager.sh && /root/vpn_manager.sh
 ```
 
-## 🔄 اپدیت سریع
-
-```bash
-wget -q -O /root/update_app.sh https://eylan.ir/v2/update_app.sh && chmod +x /root/update_app.sh && /root/update_app.sh
-```
 ## ⚙️ پیشنهاد برای تانل
 با هر روشی میتونید تانل انجام بدین من 2 مورد برای این پنل ساختم هر کدوم خواستید اجرا کنید.  
 پیشنهاد تانل 2
