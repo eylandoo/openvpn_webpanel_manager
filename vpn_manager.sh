@@ -62,7 +62,7 @@ check_openvpn_installed() {
 }
 
 check_web_panel_installed() {
-    [[ -f /root/app ]] && echo "installed" || echo "not_installed"
+    [[ -f /root/dist/app.bin ]] && echo "installed" || echo "not_installed"
 }
 
 change_username() {
