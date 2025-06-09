@@ -64,7 +64,13 @@ check_openvpn_installed() {
 }
 
 check_web_panel_installed() {
-    [[ -f /root/app.bin ]] && echo "installed" || echo "not_installed"
+    # Checks if the openvpn_manager service is currently active (running)
+    # If the service is active, it implies the unit file exists and is loaded.
+    if systemctl is-active --quiet openvpn_manager; then
+        echo "installed"
+    else
+        echo "not_installed"
+    fi
 }
 
 change_username() {
