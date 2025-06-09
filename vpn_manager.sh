@@ -118,69 +118,65 @@ show_panel_settings_menu() {
 }
 
 show_panel_info() {
-    echo -e "${CYAN}========= OpenVPN Web Panel Info =========${RESET}"
+    echo -e "<span class="math-inline">\{CYAN\}\=\=\=\=\=\=\=\=\= OpenVPN Web Panel Info \=\=\=\=\=\=\=\=\=</span>{RESET}"
 
-    # این قسمت تغییر کرده است:
-    local panel_status=$(check_web_panel_installed) # از تابع جدید استفاده می‌کنیم
-    if [[ "$panel_status" == "not_installed" ]]; then
-        echo -e "${RED}OpenVPN Web Panel is not installed or not running!${RESET}"
-        read -p "Press Enter to return to menu..." # اضافه شده تا کاربر فرصت دیدن پیام را داشته باشد
-        return
-    fi
-
-    ENV_VARS=$(systemctl show openvpn_manager --property=Environment | sed 's/^Environment=//')
+    local panel_status=$(check_web_panel_installed)
+    if [[ "<span class="math-inline">panel\_status" \=\= "not\_installed" \]\]; then
+echo \-e "</span>{RED}OpenVPN Web Panel is not installed or not running!<span class="math-inline">\{RESET\}"
+read \-p "Press Enter to return to menu\.\.\."
+return
+fi
+ENV\_VARS\=</span>(systemctl show openvpn_manager --property=Environment | sed 's/^Environment=//')
     # بررسی کنید که آیا ENV_VARS خالی نیست
-    if [[ -z "$ENV_VARS" ]]; then
-        echo -e "${RED}[✘] Could not retrieve panel environment variables. Service might not be fully configured or running correctly.${RESET}"
+    if [[ -z "$ENV_VARS" ]]; then # اینجا `then` به درستی قرار گرفته است
+        echo -e "<span class="math-inline">\{RED\}\[✘\] Could not retrieve panel environment variables\. Service might not be fully configured or running correctly\.</span>{RESET}"
         read -p "Press Enter to return to menu..."
         return
-    }
+    fi # اینجا باید `fi` باشد تا `if` بسته شود
 
-    eval "$ENV_VARS"
-
-    SERVER_HOST=$(hostname -I | awk '{print $1}')
+    eval "<span class="math-inline">ENV\_VARS"
+SERVER\_HOST\=</span>(hostname -I | awk '{print $1}')
     PROTOCOL="http"
     SSL_DIR="/etc/ssl/openvpn_manager"
     CERT_FILE="$SSL_DIR/cert.pem"
     KEY_FILE="$SSL_DIR/key.pem"
 
-    if [[ -f "$CERT_FILE" && -f "$KEY_FILE" ]]; then
-        PROTOCOL="https"
-        CN_DOMAIN=$(openssl x509 -in "$CERT_FILE" -noout -subject | sed -n 's/^subject=CN = \(.*\)$/\1/p')
-        [[ -n "$CN_DOMAIN" ]] && SERVER_HOST="$CN_DOMAIN"
-    fi
+    if [[ -f "$CERT_FILE" && -f "<span class="math-inline">KEY\_FILE" \]\]; then
+PROTOCOL\="https"
+CN\_DOMAIN\=</span>(openssl x509 -in "<span class="math-inline">CERT\_FILE" \-noout \-subject \| sed \-n 's/^subject\=CN \= \\\(\.\*\\\)</span>/\1/p')
+        [[ -n "$CN_DOMAIN" ]] && SERVER_HOST="<span class="math-inline">CN\_DOMAIN"
+fi
+echo \-e "</span>{GREEN}Panel Address: <span class="math-inline">\{RESET\}</span>{PROTOCOL}://<span class="math-inline">\{SERVER\_HOST\}\:</span>{PANEL_PORT}"
+    echo -e "${GREEN}Username:      <span class="math-inline">\{RESET\}</span>{ADMIN_USERNAME}"
+    echo -e "${GREEN}Password:      <span class="math-inline">\{RESET\}</span>{ADMIN_PASSWORD}"
 
-    echo -e "${GREEN}Panel Address: ${RESET}${PROTOCOL}://${SERVER_HOST}:${PANEL_PORT}"
-    echo -e "${GREEN}Username:      ${RESET}${ADMIN_USERNAME}"
-    echo -e "${GREEN}Password:      ${RESET}${ADMIN_PASSWORD}"
+    echo -e "\n${CYAN}========= Shortcut Command =========<span class="math-inline">\{RESET\}"
+echo \-e "</span>{YELLOW}To run this tool anytime, just type:<span class="math-inline">\{RESET\}"
+echo \-e "</span>{BLUE}vpn_manager${RESET}"
 
-    echo -e "\n${CYAN}========= Shortcut Command =========${RESET}"
-    echo -e "${YELLOW}To run this tool anytime, just type:${RESET}"
-    echo -e "${BLUE}vpn_manager${RESET}"
+    echo -e "\n${CYAN}========= Service Commands =========<span class="math-inline">\{RESET\}"
+echo \-e "</span>{YELLOW}To restart OpenVPN Core:<span class="math-inline">\{RESET\}"
+echo \-e "</span>{BLUE}systemctl restart openvpn-server@server${RESET}"
+    echo -e "<span class="math-inline">\{YELLOW\}To restart Web Panel\:</span>{RESET}"
+    echo -e "<span class="math-inline">\{BLUE\}systemctl restart openvpn\_manager</span>{RESET}"
 
-    echo -e "\n${CYAN}========= Service Commands =========${RESET}"
-    echo -e "${YELLOW}To restart OpenVPN Core:${RESET}"
-    echo -e "${BLUE}systemctl restart openvpn-server@server${RESET}"
-    echo -e "${YELLOW}To restart Web Panel:${RESET}"
-    echo -e "${BLUE}systemctl restart openvpn_manager${RESET}"
+    echo -e "\n${CYAN}========= Log Monitoring =========<span class="math-inline">\{RESET\}"
+echo \-e "</span>{YELLOW}OpenVPN Core Logs:<span class="math-inline">\{RESET\}"
+echo \-e "</span>{BLUE}journalctl -u openvpn-server@server -e -f${RESET}"
+    echo -e "<span class="math-inline">\{YELLOW\}Web Panel Logs\:</span>{RESET}"
+    echo -e "<span class="math-inline">\{BLUE\}journalctl \-u openvpn\_manager \-e \-f</span>{RESET}"
 
-    echo -e "\n${CYAN}========= Log Monitoring =========${RESET}"
-    echo -e "${YELLOW}OpenVPN Core Logs:${RESET}"
-    echo -e "${BLUE}journalctl -u openvpn-server@server -e -f${RESET}"
-    echo -e "${YELLOW}Web Panel Logs:${RESET}"
-    echo -e "${BLUE}journalctl -u openvpn_manager -e -f${RESET}"
-
-    echo -e "\n${CYAN}========= Service Status =========${RESET}"
-    if systemctl is-active --quiet openvpn-server@server; then
-        echo -e "${GREEN}[✔] OpenVPN Core service is running${RESET}"
+    echo -e "\n${CYAN}========= Service Status =========<span class="math-inline">\{RESET\}"
+if systemctl is\-active \-\-quiet openvpn\-server@server; then
+echo \-e "</span>{GREEN}[✔] OpenVPN Core service is running${RESET}"
     else
-        echo -e "${RED}[✘] OpenVPN Core service is NOT running${RESET}"
+        echo -e "<span class="math-inline">\{RED\}\[✘\] OpenVPN Core service is NOT running</span>{RESET}"
     fi
 
     if systemctl is-active --quiet openvpn_manager; then
-        echo -e "${GREEN}[✔] Web Panel service is running${RESET}"
+        echo -e "<span class="math-inline">\{GREEN\}\[✔\] Web Panel service is running</span>{RESET}"
     else
-        echo -e "${RED}[✘] Web Panel service is NOT running${RESET}"
+        echo -e "<span class="math-inline">\{RED\}\[✘\] Web Panel service is NOT running</span>{RESET}"
     fi
 
     echo
