@@ -119,13 +119,23 @@ show_panel_settings_menu() {
 
 show_panel_info() {
     echo -e "${CYAN}========= OpenVPN Web Panel Info =========${RESET}"
-    
-    if [[ ! -f /root/app.bin ]]; then
-        echo -e "${RED}OpenVPN Web Panel is not installed!${RESET}"
+
+    # این قسمت تغییر کرده است:
+    local panel_status=$(check_web_panel_installed) # از تابع جدید استفاده می‌کنیم
+    if [[ "$panel_status" == "not_installed" ]]; then
+        echo -e "${RED}OpenVPN Web Panel is not installed or not running!${RESET}"
+        read -p "Press Enter to return to menu..." # اضافه شده تا کاربر فرصت دیدن پیام را داشته باشد
         return
     fi
 
     ENV_VARS=$(systemctl show openvpn_manager --property=Environment | sed 's/^Environment=//')
+    # بررسی کنید که آیا ENV_VARS خالی نیست
+    if [[ -z "$ENV_VARS" ]]; then
+        echo -e "${RED}[✘] Could not retrieve panel environment variables. Service might not be fully configured or running correctly.${RESET}"
+        read -p "Press Enter to return to menu..."
+        return
+    }
+
     eval "$ENV_VARS"
 
     SERVER_HOST=$(hostname -I | awk '{print $1}')
