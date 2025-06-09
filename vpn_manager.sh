@@ -52,8 +52,8 @@ uninstall_web_panel() {
     systemctl stop openvpn_manager
     systemctl disable openvpn_manager
     rm -rf /etc/systemd/system/openvpn_manager.service
-    rm -rf /root/dist/app.bin
-    rm -rf /root/dist/instance/users.db
+    rm -rf /root/app.bin
+    rm -rf /root/instance/users.db
     rm -rf /root/ovpnfiles /root/instance/users.db
     rm -rf /etc/ssl/openvpn_manager/* /etc/ssl/openvpn_manager/.* 2>/dev/null
     echo -e "${GREEN}[✔] OpenVPN Web Panel has been uninstalled successfully!${RESET}"
@@ -64,7 +64,7 @@ check_openvpn_installed() {
 }
 
 check_web_panel_installed() {
-    [[ -f /root/dist/app.bin ]] && echo "installed" || echo "not_installed"
+    [[ -f /root/app.bin ]] && echo "installed" || echo "not_installed"
 }
 
 change_username() {
@@ -114,7 +114,7 @@ show_panel_settings_menu() {
 show_panel_info() {
     echo -e "${CYAN}========= OpenVPN Web Panel Info =========${RESET}"
     
-    if [[ ! -f /root/dist/app.bin ]]; then
+    if [[ ! -f /root/app.bin ]]; then
         echo -e "${RED}OpenVPN Web Panel is not installed!${RESET}"
         return
     fi
