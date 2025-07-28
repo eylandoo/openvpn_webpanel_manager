@@ -9,7 +9,6 @@ LOG_DIR="/var/log/wgpanel"
 SERVICE_NAME="wgpanel"
 NGINX_CONF="/etc/nginx/sites-available/wgpanel"
 FLASK_PORT=5001 # Internal port for Gunicorn
-# PANEL_HOST will be set after user input
 
 # --- Helper Functions ---
 print_info() { echo -e "\033[34m[INFO]\033[0m $1"; }
@@ -34,10 +33,7 @@ uninstall_panel() {
     rm -f /etc/systemd/system/$SERVICE_NAME.service
     rm -f /etc/nginx/sites-available/wgpanel
     rm -f /etc/nginx/sites-enabled/wgpanel
-    rm -rf $APP_DIR
-    rm -rf /etc/wg-manager
-    rm -rf $LOG_DIR
-    rm -rf /etc/wireguard
+    rm -rf $APP_DIR /etc/wg-manager $LOG_DIR /etc/wireguard
 
     print_info "Reloading systemd and Nginx..."
     systemctl daemon-reload
@@ -51,7 +47,6 @@ uninstall_panel() {
 install_panel() {
     print_info "Starting the Definitive WireGuard Panel installation..."
 
-    # --- OS Detection for Ubuntu 24.04 ---
     IS_UBUNTU_24=false
     if [ -f /etc/os-release ]; then
         . /etc/os-release
@@ -61,43 +56,29 @@ install_panel() {
         fi
     fi
 
-    # --- Get User Input ---
     print_info "Step 1: Panel Configuration"
     read -p "Enter the PUBLIC IP of THIS server: " MAIN_SERVER_IP
-    if [[ -z "$MAIN_SERVER_IP" ]]; then
-        print_error "The public IP of this server cannot be empty."
-    fi
+    if [[ -z "$MAIN_SERVER_IP" ]]; then print_error "The public IP cannot be empty."; fi
     PANEL_HOST=$MAIN_SERVER_IP
 
-    read -p "Enter the public port for the web panel (e.g., 80): " PANEL_PORT
-    PANEL_PORT=${PANEL_PORT:-80}
+    read -p "Enter the public port for the web panel (e.g., 80): " PANEL_PORT; PANEL_PORT=${PANEL_PORT:-80}
     read -p "Enter a username for the panel login: " ADMIN_USER
-    read -s -p "Enter a password for the panel login: " ADMIN_PASS
-    echo ""
-    if [[ -z "$ADMIN_USER" || -z "$ADMIN_PASS" ]]; then
-        print_error "Username and password cannot be empty."
-    fi
+    read -s -p "Enter a password for the panel login: " ADMIN_PASS; echo ""
+    if [[ -z "$ADMIN_USER" || -z "$ADMIN_PASS" ]]; then print_error "Username and password cannot be empty."; fi
     
-    # --- Install System Dependencies ---
     print_info "Step 2: Installing System & Python Dependencies..."
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y
     
-    # MODIFIED: Re-added ufw to ensure the disable command is available
-    if [ "$IS_UBUNTU_24" = true ]; then
-        apt-get install -y python3-pip python3-venv nginx wireguard-tools curl net-tools ufw || print_error "Failed to install system dependencies."
-    else
-        apt-get install -y python3-pip nginx wireguard-tools curl net-tools ufw || print_error "Failed to install system dependencies."
-    fi
+    APT_PACKAGES="python3-pip nginx wireguard-tools curl net-tools ufw"
+    if [ "$IS_UBUNTU_24" = true ]; then APT_PACKAGES+=" python3-venv"; fi
+    apt-get install -y $APT_PACKAGES || print_error "Failed to install system dependencies."
 
-    # --- Setup Application Environment & Install Python packages ---
     print_info "Step 3: Setting up Application Environment..."
     mkdir -p $APP_DIR/templates
     
     if [ "$IS_UBUNTU_24" = true ]; then
-        print_info "Creating Python virtual environment..."
         python3 -m venv "$APP_DIR/venv"
-        print_info "Installing Python packages inside virtual environment..."
         "$APP_DIR/venv/bin/pip3" install --upgrade pip
         "$APP_DIR/venv/bin/pip3" install flask flask-login paramiko gunicorn werkzeug || print_error "Failed to install Python packages in venv."
     else
@@ -105,27 +86,18 @@ install_panel() {
         pip3 install flask flask-login paramiko gunicorn werkzeug || print_error "Failed to install Python packages."
     fi
     
-    mkdir -p /etc/wg-manager
-    mkdir -p /etc/wireguard
-    mkdir -p $LOG_DIR && chmod 755 $LOG_DIR
-    
-    echo '[]' > /etc/wireguard/peers.json
-    chmod 600 /etc/wireguard/peers.json
+    mkdir -p /etc/wg-manager; mkdir -p /etc/wireguard; mkdir -p $LOG_DIR && chmod 755 $LOG_DIR
+    echo '[]' > /etc/wireguard/peers.json; chmod 600 /etc/wireguard/peers.json
     
     SECRET_KEY=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
-    echo "$SECRET_KEY" > /etc/wg-manager/secret.key
-    chmod 600 /etc/wg-manager/secret.key
+    echo "$SECRET_KEY" > /etc/wg-manager/secret.key; chmod 600 /etc/wg-manager/secret.key
 
     HASHED_PASS=$(python3 -c "from werkzeug.security import generate_password_hash; print(generate_password_hash('$ADMIN_PASS'))")
-    echo "{\"username\": \"$ADMIN_USER\", \"password_hash\": \"$HASHED_PASS\"}" > /etc/wg-manager/auth.json
-    chmod 600 /etc/wg-manager/auth.json
+    echo "{\"username\": \"$ADMIN_USER\", \"password_hash\": \"$HASHED_PASS\"}" > /etc/wg-manager/auth.json; chmod 600 /etc/wg-manager/auth.json
 
-    # --- Configure Main WireGuard Server ---
     print_info "Step 4: Configuring Main WireGuard Server..."
     DEFAULT_IFACE=$(ip -4 route ls | grep default | grep -Po '(?<=dev )(\S+)' | head -1)
-    if [[ -z "$DEFAULT_IFACE" ]]; then
-        print_error "Could not determine the default network interface."
-    fi
+    if [[ -z "$DEFAULT_IFACE" ]]; then print_error "Could not determine the default network interface."; fi
     MAIN_PRIV_KEY=$(wg genkey)
     cat << EOF > /etc/wireguard/wg1.conf
 [Interface]
@@ -142,14 +114,12 @@ EOF
     sysctl -w net.ipv4.ip_forward=1
     sed -i '/net.ipv4.ip_forward=1/s/^#*//' /etc/sysctl.conf || echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
     
-    # DEFINITIVE FIX: Disable UFW on main server
     print_info "Disabling firewall (UFW) on main server as requested..."
     ufw disable || true
 
     print_info "Starting main WireGuard interface..."
     systemctl enable --now wg-quick@wg1
     
-    # --- Create Application Files ---
     print_info "Step 5: Creating Application Files..."
     # worker.py
     cat << 'EOF' > $APP_DIR/worker.py
@@ -263,10 +233,8 @@ def main():
         logger.log("Step 1/6: Cleaning up old configs and interfaces on remote server..."); ssh_exec(*ssh_creds, cleanup_cmd, logger)
         
         logger.log("Step 2/6: Updating package lists on remote server..."); ssh_exec(*ssh_creds, "export DEBIAN_FRONTEND=noninteractive; apt-get update -y", logger)
-        # MODIFIED: Re-added ufw to ensure the disable command is available
         logger.log("Step 3/6: Installing dependencies on remote server..."); ssh_exec(*ssh_creds, "export DEBIAN_FRONTEND=noninteractive; apt-get install -y wireguard-tools ufw", logger)
         
-        # DEFINITIVE FIX: Disable UFW on remote server
         logger.log("Step 4/6: Disabling firewall (UFW) on remote server as requested...")
         ssh_exec(*ssh_creds, "ufw disable", logger, ignore_fail=True)
         
@@ -284,7 +252,7 @@ def main():
             logger.log(f"\n--- [DIAGNOSTICS] systemctl status wg-quick@wg1 ---\n{status_output}\n-------------------------------------------------\n")
             _, journal_output = ssh_exec(*ssh_creds, "journalctl -xeu wg-quick@wg1.service --no-pager -n 50", logger, ignore_fail=True)
             logger.log(f"\n--- [DIAGNOSTICS] journalctl -xeu wg-quick@wg1 ---\n{journal_output}\n------------------------------------------------\n")
-            raise Exception(f"Failed to start wg-quick@wg1 service. See diagnostic logs above. Original error: {e}")
+            raise Exception(f"Failed to start wg-quick@wg1 service. See diagnostic logs above.")
         
         logger.log("Configuring peer on local server...")
         run_cmd(f"wg set {WG_INTERFACE} peer \"{peer_data['pubkey']}\" allowed-ips \"{peer_data['ip']}/32\" preshared-key /dev/stdin", stdin_input=peer_data['psk'])
@@ -322,22 +290,16 @@ def main():
             try:
                 peers = json.load(f)
                 for i, p in enumerate(peers):
-                    if p.get('public_ip') == peer_data['public_ip']:
-                        peers[i] = peer_data; break
-                f.seek(0)
-                json.dump(peers, f, indent=2)
-                f.truncate()
-                f.flush()
-                os.fsync(f.fileno())
-            finally:
-                fcntl.flock(f, fcntl.LOCK_UN)
+                    if p.get('public_ip') == peer_data['public_ip']: peers[i] = peer_data; break
+                f.seek(0); json.dump(peers, f, indent=2); f.truncate()
+                f.flush(); os.fsync(f.fileno())
+            finally: fcntl.flock(f, fcntl.LOCK_UN)
 
         logger.done("Installation successful!")
     except Exception as e:
         logger.error(f"FATAL: {str(e)}")
 
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": main()
 EOF
 
     # app.py
@@ -352,20 +314,14 @@ app = Flask(__name__)
 
 SECRET_KEY_FILE = "/etc/wg-manager/secret.key"
 try:
-    with open(SECRET_KEY_FILE, 'r') as f:
-        app.config['SECRET_KEY'] = f.read().strip()
+    with open(SECRET_KEY_FILE, 'r') as f: app.config['SECRET_KEY'] = f.read().strip()
 except Exception as e:
-    raise RuntimeError(f"Could not load SECRET_KEY from {SECRET_KEY_FILE}. Please reinstall the panel. Error: {e}")
+    raise RuntimeError(f"Could not load SECRET_KEY from {SECRET_KEY_FILE}. Reinstall panel. Error: {e}")
 
-login_manager = LoginManager()
-login_manager.init_app(app)
-login_manager.login_view = 'login'
+login_manager = LoginManager(); login_manager.init_app(app); login_manager.login_view = 'login'
 
-WG_INTERFACE = "wg1"
-PEERS_FILE = "/etc/wireguard/peers.json"
-AUTH_FILE = "/etc/wg-manager/auth.json"
-LOG_DIR = "/var/log/wgpanel"
-APP_DIR = "/root/wg-manager-pro"
+WG_INTERFACE = "wg1"; PEERS_FILE = "/etc/wireguard/peers.json"; AUTH_FILE = "/etc/wg-manager/auth.json"
+LOG_DIR = "/var/log/wgpanel"; APP_DIR = "/root/wg-manager-pro"; IRAN_PUBLIC_IP_FILE = "/etc/wireguard/iran_public_ip.txt"
 
 class User(UserMixin):
     def __init__(self, id, username, password_hash): self.id, self.username, self.password_hash = id, username, password_hash
@@ -379,26 +335,22 @@ class User(UserMixin):
 @login_manager.user_loader
 def load_user(user_id): return User.get(user_id)
 
-def run_cmd(command):
-    try: return subprocess.run(command, shell=True, check=True, capture_output=True, text=True, executable='/bin/bash').stdout.strip()
+def run_cmd(command, check=True):
+    try:
+        return subprocess.run(command, shell=True, check=check, capture_output=True, text=True, executable='/bin/bash', timeout=5)
     except: return None
 
 def load_peers():
     try:
         with open(PEERS_FILE, 'r') as f:
-            fcntl.flock(f, fcntl.LOCK_SH)
-            peers = json.load(f)
-            fcntl.flock(f, fcntl.LOCK_UN)
+            fcntl.flock(f, fcntl.LOCK_SH); peers = json.load(f); fcntl.flock(f, fcntl.LOCK_UN)
             return peers
     except: return []
 
 def save_peers(peers_data):
     with open(PEERS_FILE, 'w') as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        json.dump(peers_data, f, indent=2)
-        f.flush()
-        os.fsync(f.fileno())
-        fcntl.flock(f, fcntl.LOCK_UN)
+        fcntl.flock(f, fcntl.LOCK_EX); json.dump(peers_data, f, indent=2); f.flush()
+        os.fsync(f.fileno()); fcntl.flock(f, fcntl.LOCK_UN)
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
@@ -421,30 +373,67 @@ def index(): return render_template('dashboard.html')
 @login_required
 def api_data():
     all_peers = load_peers()
-    handshakes = run_cmd(f"wg show {WG_INTERFACE} latest-handshakes") or ""
-    peers_data = []
-    for p in all_peers:
-        safe_peer = {k: v for k, v in p.items() if k not in ['ssh_pass', 'privkey', 'psk']}
-        if safe_peer.get('state') == 'installed':
-            safe_peer['status'] = 'Active' if safe_peer.get('pubkey') and safe_peer.get('pubkey') in handshakes else 'Disconnected'
-        else:
-            safe_peer['status'] = 'Pending'
-        peers_data.append(safe_peer)
-    return jsonify({'peers': peers_data})
+    main_ip, main_private_ip = "Not Set", "Not Set"
+    try:
+        with open(IRAN_PUBLIC_IP_FILE, 'r') as f: main_ip = f.read().strip()
+    except: pass
+    try:
+        with open(f"/etc/wireguard/{WG_INTERFACE}.conf", 'r') as f:
+            for line in f:
+                if line.strip().lower().startswith("address"):
+                    main_private_ip = line.split('=')[1].strip().split('/')[0]
+                    break
+    except: pass
+        
+    peers_data = [{k: v for k, v in p.items() if k not in ['ssh_pass', 'privkey', 'psk']} for p in all_peers]
+    return jsonify({'peers': peers_data, 'main_server_ip': main_ip, 'main_server_private_ip': main_private_ip})
+
+@app.route('/api/ping/<private_ip>')
+@login_required
+def ping_peer(private_ip):
+    if not re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", private_ip):
+        return jsonify({'status': 'error', 'message': 'Invalid IP format'}), 400
+    peers = load_peers()
+    if not any(p.get('ip') == private_ip for p in peers):
+        return jsonify({'status': 'error', 'message': 'Unknown peer'}), 404
+
+    result = run_cmd(f"ping -c 1 -W 2 {private_ip}", check=False)
+    return jsonify({'status': 'Online'}) if result and result.returncode == 0 else jsonify({'status': 'Offline'})
+
+@app.route('/api/restart_peer', methods=['POST'])
+@login_required
+def restart_peer():
+    public_ip = request.json.get('public_ip')
+    if not public_ip: return jsonify({'message': 'Public IP is required'}), 400
+    
+    peers = load_peers()
+    peer = next((p for p in peers if p.get('public_ip') == public_ip), None)
+    if not peer: return jsonify({'message': 'Peer not found.'}), 404
+
+    try:
+        run_cmd("systemctl restart wg-quick@wg1")
+        
+        ssh = paramiko.SSHClient(); ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(peer['public_ip'], port=int(peer['ssh_port']), username=peer['ssh_user'], password=peer['ssh_pass'], timeout=20)
+        _, stdout, stderr = ssh.exec_command("systemctl restart wg-quick@wg1")
+        if stdout.channel.recv_exit_status() != 0:
+            raise Exception(f"Failed to restart remote service: {stderr.read().decode()}")
+        ssh.close()
+        
+        return jsonify({'message': 'Restart signal sent to both servers successfully.'})
+    except Exception as e:
+        return jsonify({'message': f'An error occurred: {str(e)}'}), 500
 
 @app.route('/api/verify_and_add', methods=['POST'])
 @login_required
 def verify_and_add():
-    data = request.json
-    ip, port, user, password = data['f_ip'], data['s_port'], data['s_user'], data['s_pass']
+    data = request.json; ip, port, user, password = data['f_ip'], data['s_port'], data['s_user'], data['s_pass']
     peers = load_peers()
-    if any(p['public_ip'] == ip for p in peers):
-        return jsonify({'message': 'A peer with this public IP already exists.'}), 400
+    if any(p['public_ip'] == ip for p in peers): return jsonify({'message': 'A peer with this public IP already exists.'}), 400
     try:
         ssh = paramiko.SSHClient(); ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         ssh.connect(ip, port=int(port), username=user, password=password, timeout=20); ssh.close()
-    except Exception as e:
-        return jsonify({'message': f'SSH connection failed: {e}'}), 500
+    except Exception as e: return jsonify({'message': f'SSH connection failed: {e}'}), 500
     new_peer = {"public_ip": ip, "ssh_port": port, "ssh_user": user, "ssh_pass": password, "state": "pending"}
     peers.append(new_peer); save_peers(peers)
     return jsonify({'message': 'SSH verified. Peer added in "Pending" state.'})
@@ -456,12 +445,7 @@ def install_peer():
     if not public_ip: return jsonify({'message': 'Public IP is required'}), 400
     log_file = os.path.join(LOG_DIR, f"{public_ip}.log")
     if os.path.exists(log_file): os.remove(log_file)
-
-    python_executable = '/usr/bin/python3'
-    venv_python = f'{APP_DIR}/venv/bin/python3'
-    if os.path.exists(venv_python):
-        python_executable = venv_python
-    
+    python_executable = f'{APP_DIR}/venv/bin/python3' if os.path.exists(f'{APP_DIR}/venv/bin/python3') else '/usr/bin/python3'
     command = [python_executable, f'{APP_DIR}/worker.py', public_ip]
     subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return jsonify({'status': 'started'})
@@ -469,13 +453,9 @@ def install_peer():
 @app.route('/api/log/<path:public_ip>')
 @login_required
 def get_log(public_ip):
-    if not re.match(r"^[0-9a-fA-F\.:]+$", public_ip) or '..' in public_ip: 
-        return jsonify({"status": "error", "log": "Invalid characters in IP address."}), 400
-    
+    if not re.match(r"^[0-9a-zA-Z\.:-]+$", public_ip): return jsonify({"status": "error", "log": "Invalid characters in IP address."}), 400
     log_file_path = os.path.join(LOG_DIR, f"{public_ip}.log")
-    if not os.path.exists(log_file_path) or not os.path.abspath(log_file_path).startswith(LOG_DIR):
-        return jsonify({'status': 'running', 'log': 'Waiting for process to start...'})
-        
+    if not os.path.exists(log_file_path): return jsonify({'status': 'running', 'log': 'Waiting for process to start...'})
     with open(log_file_path, 'r') as f: content = f.read()
     status = 'running'
     if '---DONE---' in content: status = 'done'
@@ -492,24 +472,23 @@ def remove_peer():
     if not peer: return jsonify({'message': 'Peer not found.'}), 404
     
     new_peers_list = [p for p in peers if p.get('public_ip') != public_ip]
-    save_peers(new_peers_list)
-
+    
     if peer.get('state') == 'installed':
         try:
+            run_cmd(f"wg set {WG_INTERFACE} peer \"{peer['pubkey']}\" remove")
+            run_cmd(f"wg-quick save {WG_INTERFACE}")
             ssh = paramiko.SSHClient(); ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             ssh.connect(peer['public_ip'], port=int(peer['ssh_port']), username=peer['ssh_user'], password=peer['ssh_pass'], timeout=20)
             ssh.exec_command("systemctl stop wg-quick@wg1 >/dev/null 2>&1; systemctl disable wg-quick@wg1 >/dev/null 2>&1; rm -f /etc/wireguard/wg1.conf")
             ssh.close()
-            run_cmd(f"wg set {WG_INTERFACE} peer \"{peer['pubkey']}\" remove")
-            run_cmd(f"wg-quick save {WG_INTERFACE}")
-            return jsonify({'message': 'Peer removed successfully.'})
         except Exception as e:
+            save_peers(new_peers_list)
             return jsonify({'message': f'Peer removed locally, but could not clean up remote server: {e}'}), 500
     
-    return jsonify({'message': 'Pending peer removed successfully.'})
+    save_peers(new_peers_list)
+    return jsonify({'message': 'Peer removed successfully.'})
 
-if __name__ == '__main__':
-    app.run(host='127.0.0.1', port=int(os.environ.get("FLASK_PORT", 5001)))
+if __name__ == '__main__': app.run(host='127.0.0.1', port=int(os.environ.get("FLASK_PORT", 5001)))
 EOF
 
     cat << 'EOF' > $APP_DIR/templates/dashboard.html
@@ -518,223 +497,165 @@ EOF
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>WG Panel Manager</title>
+    <title>WG Panel Ultimate</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
     <style>
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes toastIn { from { opacity: 0; transform: translateY(-20px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes toastOut { from { opacity: 1; transform: translateY(0); } to { opacity: 0; transform: translateY(-20px); } }
+        .fade-in { animation: fadeIn 0.5s ease-out forwards; }
         [x-cloak] { display: none !important; }
-        .log-output { white-space: pre-wrap; word-wrap: break-word; font-size: 0.8rem; line-height: 1.5; font-family: monospace; }
-        .spinner { border-top-color: #3498db; }
-        @media (max-width: 768px) {
-            .responsive-table thead { display: none; }
-            .responsive-table tr { 
-                display: block; 
-                margin-bottom: 1rem;
-                border: 1px solid #4a5568;
-                border-radius: 0.5rem;
-                padding: 1rem;
-            }
-            .responsive-table td { 
-                display: flex; 
-                justify-content: space-between;
-                align-items: center;
-                padding: 0.5rem 0;
-                border: none;
-            }
-            .responsive-table td::before {
-                content: attr(data-label);
-                font-weight: bold;
-                margin-right: 1rem;
-                color: #a0aec0;
-            }
-            .responsive-table td:last-child {
-                justify-content: flex-end;
-            }
-             .responsive-table td:last-child::before {
-                display: none;
-            }
-        }
+        .glass-card { background: rgba(31, 41, 55, 0.5); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.1); }
+        .status-badge .dot { width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+        .log-step { display: flex; align-items: center; padding: 0.75rem 0; border-bottom: 1px solid #374151; transition: all 0.3s ease; }
+        .log-step.status-success { color: #4ade80; } .log-step.status-error { color: #f87171; }
+        .log-step.status-pending { color: #9ca3af; } .log-step.status-running { color: #60a5fa; }
+        .log-step-icon { width: 24px; height: 24px; margin-right: 1rem; }
     </style>
 </head>
 <body class="bg-gray-900 text-gray-200" x-data="wireguardManager()" x-cloak>
+    
+    <div class="absolute top-0 left-0 w-full h-full bg-gradient-to-br from-gray-900 to-black -z-10"></div>
+
+    <div x-show="notification.show" 
+         class="fixed top-5 right-5 z-[100] flex items-center p-4 max-w-sm text-white rounded-lg shadow-lg glass-card"
+         :class="{ 'border-green-400': notification.type === 'success', 'border-red-400': notification.type === 'error' }"
+         x-transition:enter="toastIn 0.3s ease-out" x-transition:leave="toastOut 0.3s ease-in">
+        <div x-text="notification.message"></div>
+        <button @click="notification.show = false" class="ml-4 text-xl">&times;</button>
+    </div>
+
     <div class="container mx-auto p-4 md:p-8">
-        <header class="flex justify-between items-center mb-6">
-            <h1 class="text-2xl font-bold flex items-center"><i class="bi bi-shield-lock-fill text-green-400 mr-3"></i>WG Panel Manager</h1>
-            <a href="/logout" class="text-gray-400 hover:text-white transition"><i class="bi bi-box-arrow-right"></i> Logout</a>
+        <header class="flex flex-col sm:flex-row justify-between items-center mb-8 pb-4 border-b border-gray-700/50">
+            <h1 class="text-3xl font-bold flex items-center mb-4 sm:mb-0 text-white">
+                <svg class="w-8 h-8 mr-3 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg>
+                WG Panel Ultimate
+            </h1>
+            <div class="flex items-center space-x-4"><div class="text-right"><div class="text-xs text-gray-400">Main Server (Public / Private)</div><div class="font-mono text-sm"><span x-text="mainServerIp"></span> / <span x-text="mainServerPrivateIp"></span></div></div><a href="/logout" class="text-gray-400 hover:text-white transition" title="Logout"><i class="bi bi-box-arrow-right text-2xl"></i></a></div>
         </header>
+
         <main>
-            <div>
-                <div class="flex justify-end mb-4">
-                    <button @click="modals.addPeer = true" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg transition flex items-center">
-                        <i class="bi bi-plus-circle mr-2"></i> Add New Server
-                    </button>
-                </div>
-                <div class="bg-gray-800 rounded-lg overflow-hidden border border-gray-700">
-                    <table class="min-w-full responsive-table">
-                         <thead class="bg-gray-700">
-                            <tr>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Private IP</th>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Public IP</th>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Status</th>
-                                <th class="px-6 py-3 text-center text-xs font-medium text-gray-300 uppercase tracking-wider">Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody class="divide-y divide-gray-700 md:divide-y-0">
-                            <template x-if="peers.length === 0">
-                                <tr><td colspan="4" class="text-center text-gray-400 py-8 !flex justify-center">No foreign servers have been added yet.</td></tr>
-                            </template>
-                            <template x-for="peer in peers" :key="peer.public_ip">
-                                <tr class="hover:bg-gray-700/50 transition">
-                                    <td data-label="Private IP" class="px-6 py-4 whitespace-nowrap"><code class="bg-gray-900 px-2 py-1 rounded" x-text="peer.ip || 'N/A'"></code></td>
-                                    <td data-label="Public IP" class="px-6 py-4 whitespace-nowrap" x-text="peer.public_ip"></td>
-                                    <td data-label="Status" class="px-6 py-4 whitespace-nowrap">
-                                        <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full"
-                                              :class="{ 'bg-green-500 text-green-900': peer.status === 'Active', 'bg-red-500 text-red-900': peer.status === 'Disconnected', 'bg-yellow-500 text-yellow-900': peer.status === 'Pending' }"
-                                              x-text="peer.status"></span>
-                                    </td>
-                                    <td data-label="Actions" class="px-6 py-4 whitespace-nowrap text-center text-sm font-medium space-x-2">
-                                        <template x-if="peer.state === 'pending'">
-                                            <button @click="installPeer(peer)" class="text-green-400 hover:text-green-300" title="Install"><i class="bi bi-download text-lg"></i></button>
-                                        </template>
-                                        <button @click="removePeer(peer)" class="text-red-400 hover:text-red-300" title="Remove"><i class="bi bi-trash text-lg"></i></button>
-                                    </td>
-                                </tr>
-                            </template>
-                        </tbody>
-                    </table>
-                </div>
+            <div class="flex justify-end mb-6"><button @click="modals.addPeer = true" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg transition flex items-center shadow-lg transform hover:scale-105"><i class="bi bi-plus-circle mr-2"></i> Add New Server</button></div>
+            <div x-show="peers.length === 0" class="text-center text-gray-500 py-16 fade-in"><i class="bi bi-hdd-network text-6xl mb-4"></i><p>No foreign servers have been added yet.</p></div>
+            <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+                <template x-for="(peer, index) in peers" :key="peer.public_ip">
+                    <div class="glass-card rounded-xl shadow-lg p-5 flex flex-col justify-between hover:border-blue-400 transition fade-in" :style="`animation-delay: ${index * 100}ms`">
+                        <div>
+                            <div class="flex justify-between items-start mb-4"><div><p class="text-xs text-gray-400">Public IP</p><p class="font-bold text-lg font-mono text-white" x-text="peer.public_ip"></p></div><div class="flex items-center text-xs font-semibold px-2 py-1 rounded-full" :class="{ 'bg-green-500/10 text-green-400': peer.status === 'Online', 'bg-red-500/10 text-red-400': peer.status === 'Offline', 'bg-yellow-500/10 text-yellow-400': peer.status === 'Pending', 'bg-blue-500/10 text-blue-400': peer.status === 'Pinging...' }"><span class="dot" :class="{ 'bg-green-400': peer.status === 'Online', 'bg-red-400': peer.status === 'Offline', 'bg-yellow-400': peer.status === 'Pending', 'bg-blue-400 animate-pulse': peer.status === 'Pinging...' }"></span><span x-text="peer.status"></span></div></div>
+                            <p class="text-xs text-gray-400">Private IP</p><p class="font-mono bg-gray-900/50 inline-block px-2 py-1 rounded" x-text="peer.ip || 'N/A'"></p>
+                        </div>
+                        <div class="mt-6 flex justify-end items-center space-x-2 border-t border-gray-700/50 pt-4">
+                            <template x-if="peer.state === 'installed'"><button @click="showConfirm('Restart Connection?', `This will restart the WireGuard service on both the main server and ${peer.public_ip}.`, () => restartPeer(peer))" :disabled="peer.restarting" class="text-gray-400 hover:text-blue-400 transition p-2 rounded-full disabled:opacity-50 disabled:cursor-not-allowed" title="Restart Connection"><svg x-show="peer.restarting" class="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg><i x-show="!peer.restarting" class="bi bi-arrow-repeat text-xl"></i></button></template>
+                            <template x-if="peer.state === 'pending'"><button @click="installPeer(peer)" class="text-gray-400 hover:text-green-400 transition p-2 rounded-full" title="Install"><i class="bi bi-download text-xl"></i></button></template>
+                            <button @click="showConfirm('Remove Peer?', `This will permanently remove ${peer.public_ip} and its configuration. This action cannot be undone.`, () => removePeer(peer))" class="text-gray-400 hover:text-red-400 transition p-2 rounded-full" title="Remove"><i class="bi bi-trash text-xl"></i></button>
+                        </div>
+                    </div>
+                </template>
             </div>
         </main>
     </div>
-    <div x-show="modals.addPeer" @keydown.escape.window="modals.addPeer = false" class="fixed inset-0 z-10 overflow-y-auto" x-cloak>
-        <div class="flex items-center justify-center min-h-screen px-4">
-            <div @click="modals.addPeer = false" class="fixed inset-0 bg-black opacity-50"></div>
-            <div class="bg-gray-800 rounded-lg shadow-xl p-6 w-full max-w-md z-20 border border-gray-700">
-                <h3 class="text-lg font-bold mb-4">Add & Verify Server</h3>
-                <div x-show="addForm.error" class="bg-red-500/20 border border-red-500 text-red-300 p-3 rounded mb-4" x-text="addForm.error"></div>
-                <form @submit.prevent="verifyAndAddPeer">
-                    <div class="mb-3"><label class="block">Foreign IP</label><input type="text" x-model="addForm.f_ip" class="w-full bg-gray-700 rounded p-2 mt-1" required></div>
-                    <div class="mb-3"><label class="block">SSH Port</label><input type="number" x-model="addForm.s_port" class="w-full bg-gray-700 rounded p-2 mt-1" required></div>
-                    <div class="mb-3"><label class="block">SSH User</label><input type="text" x-model="addForm.s_user" class="w-full bg-gray-700 rounded p-2 mt-1" required></div>
-                    <div class="mb-3"><label class="block">SSH Pass</label><input type="password" x-model="addForm.s_pass" class="w-full bg-gray-700 rounded p-2 mt-1" required></div>
-                    <div class="flex justify-end items-center mt-4">
-                        <button type="button" @click="modals.addPeer = false" class="bg-gray-600 text-white px-4 py-2 rounded mr-2">Cancel</button>
-                        <button type="submit" class="bg-blue-600 text-white px-4 py-2 rounded flex items-center" :class="{'opacity-50': addForm.loading}" :disabled="addForm.loading">
-                            <span x-show="addForm.loading" class="animate-spin spinner mr-2 inline-block w-4 h-4 border-2 rounded-full"></span>
-                            Verify & Add
-                        </button>
-                    </div>
-                </form>
-            </div>
+
+    <div x-show="confirmModal.show" @keydown.escape.window="confirmModal.show = false" class="fixed inset-0 z-50 flex items-center justify-center p-4" x-cloak>
+        <div @click="confirmModal.show = false" class="fixed inset-0 bg-black/70 backdrop-blur-sm"></div>
+        <div class="glass-card rounded-xl shadow-lg p-6 w-full max-w-sm z-20">
+            <h3 class="text-lg font-bold mb-2 text-white" x-text="confirmModal.title"></h3>
+            <p class="text-gray-300 mb-6" x-text="confirmModal.message"></p>
+            <div class="flex justify-end items-center"><button @click="confirmModal.show = false" class="bg-gray-600/50 hover:bg-gray-500/50 text-white px-4 py-2 rounded-lg mr-2 transition">Cancel</button><button @click="confirmModal.onConfirm(); confirmModal.show = false;" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg transition">Confirm</button></div>
         </div>
     </div>
-    <div x-show="modals.log" @keydown.escape.window="stopLogPolling()" class="fixed inset-0 z-10 overflow-y-auto" x-cloak>
-        <div class="flex items-center justify-center min-h-screen px-4">
-            <div @click="stopLogPolling()" class="fixed inset-0 bg-black opacity-50"></div>
-            <div class="bg-gray-800 rounded-lg shadow-xl w-full max-w-4xl z-20 border border-gray-700">
-                <div class="flex justify-between items-center p-4 border-b border-gray-700">
-                    <h5 class="font-bold" x-text="log.title"></h5>
-                    <div x-show="log.running" class="animate-spin spinner inline-block w-4 h-4 border-2 rounded-full text-blue-400" role="status"></div>
-                </div>
-                <div class="p-4" style="max-height: 60vh; overflow-y: auto;"><pre class="log-output bg-black p-4 rounded-md" x-html="log.output"></pre></div>
-                <div class="p-4 border-t border-gray-700 flex justify-end">
-                    <button @click="stopLogPolling()" class="bg-gray-600 text-white px-4 py-2 rounded">Close</button>
-                </div>
-            </div>
-        </div>
+    
+    <div x-show="modals.log" @keydown.escape.window="closeLogModal()" class="fixed inset-0 z-50 flex items-center justify-center p-4" x-cloak>
+        <div @click="closeLogModal()" class="fixed inset-0 bg-black/70 backdrop-blur-sm"></div><div class="bg-gray-800 rounded-lg shadow-xl w-full max-w-2xl z-20 border border-gray-700 max-h-[90vh] flex flex-col"><div class="flex justify-between items-center p-4 border-b border-gray-700"><h5 class="font-bold text-white" x-text="`Installation on ${log.peerIp}`"></h5><button @click="closeLogModal()" class="text-gray-400 hover:text-white">&times;</button></div><div class="p-6 overflow-y-auto"><ul><template x-for="step in log.steps" :key="step.id"><li class="log-step" :class="`status-${step.status}`"><div class="log-step-icon" x-html="getStepIcon(step.status)"></div><span class="font-semibold" x-text="step.text"></span></li></template></ul></div><div class="p-4 border-t border-gray-700"><button @click="log.showRaw = !log.showRaw" class="text-xs text-gray-400 hover:text-white">Toggle Raw Log</button><div x-show="log.showRaw" x-collapse><pre class="mt-2 text-xs bg-black p-2 rounded max-h-48 overflow-y-auto" x-text="log.rawOutput"></pre></div></div></div>
+    </div>
+    <div x-show="modals.addPeer" @keydown.escape.window="modals.addPeer = false" class="fixed inset-0 z-50 flex items-center justify-center p-4" x-cloak>
+        <div @click="modals.addPeer = false" class="fixed inset-0 bg-black/70 backdrop-blur-sm"></div><div class="glass-card rounded-xl shadow-lg p-6 w-full max-w-md z-20"><h3 class="text-lg font-bold mb-4 text-white">Add & Verify Server</h3><div x-show="addForm.error" class="bg-red-500/20 border border-red-500 text-red-300 p-3 rounded mb-4" x-text="addForm.error"></div><form @submit.prevent="verifyAndAddPeer"><div class="mb-3"><label class="block text-sm text-gray-300">Foreign IP</label><input type="text" x-model="addForm.f_ip" class="w-full bg-gray-900/50 border border-gray-600 rounded p-2 mt-1 text-white focus:outline-none focus:ring-2 focus:ring-blue-500" required></div><div class="mb-3"><label class="block text-sm text-gray-300">SSH Port</label><input type="number" x-model="addForm.s_port" class="w-full bg-gray-900/50 border border-gray-600 rounded p-2 mt-1 text-white focus:outline-none focus:ring-2 focus:ring-blue-500" required></div><div class="mb-3"><label class="block text-sm text-gray-300">SSH User</label><input type="text" x-model="addForm.s_user" class="w-full bg-gray-900/50 border border-gray-600 rounded p-2 mt-1 text-white focus:outline-none focus:ring-2 focus:ring-blue-500" required></div><div class="mb-3"><label class="block text-sm text-gray-300">SSH Pass</label><input type="password" x-model="addForm.s_pass" class="w-full bg-gray-900/50 border border-gray-600 rounded p-2 mt-1 text-white focus:outline-none focus:ring-2 focus:ring-blue-500" required></div><div class="flex justify-end items-center mt-4"><button type="button" @click="modals.addPeer = false" class="bg-gray-600/50 hover:bg-gray-500/50 text-white px-4 py-2 rounded-lg mr-2 transition">Cancel</button><button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg flex items-center transition" :class="{'opacity-50': addForm.loading}" :disabled="addForm.loading"><span x-show="addForm.loading" class="animate-spin spinner mr-2 inline-block w-4 h-4 border-2 rounded-full"></span>Verify & Add</button></div></form></div>
     </div>
     
     <script>
     document.addEventListener('alpine:init', () => {
         Alpine.data('wireguardManager', () => ({
-            peers: [],
+            peers: [], mainServerIp: '...', mainServerPrivateIp: '...',
             modals: { addPeer: false, log: false },
             addForm: { f_ip: '', s_port: 22, s_user: 'root', s_pass: '', loading: false, error: '' },
-            log: { title: '', output: '', running: false, poller: null },
-            init() { this.fetchPeers(); setInterval(() => this.fetchPeers(), 30000); },
+            log: { peerIp: '', poller: null, rawOutput: '', showRaw: false, steps: [] },
+            notification: { show: false, message: '', type: 'success' },
+            confirmModal: { show: false, title: '', message: '', onConfirm: () => {} },
+            
+            init() { this.fetchData(); },
+
+            showNotification(message, type = 'success', duration = 4000) { this.notification.message = message; this.notification.type = type; this.notification.show = true; setTimeout(() => this.notification.show = false, duration); },
+            showConfirm(title, message, onConfirmCallback) { this.confirmModal.title = title; this.confirmModal.message = message; this.confirmModal.onConfirm = onConfirmCallback; this.confirmModal.show = true; },
+
             async apiRequest(url, method = 'GET', body = null) {
-                const options = { method, headers: {} };
-                if (body) {
-                    options.headers['Content-Type'] = 'application/json';
-                    options.body = JSON.stringify(body);
+                try {
+                    const res = await fetch(url, { method, headers: body ? {'Content-Type': 'application/json'} : {}, body: body ? JSON.stringify(body) : null });
+                    if (res.status === 401) { window.location.reload(); throw new Error("Session expired."); }
+                    // Try to parse JSON, if it fails, throw an error with the text content
+                    const text = await res.text();
+                    const data = text ? JSON.parse(text) : {};
+                    if (!res.ok) { throw new Error(data.message || `An unknown error occurred (Status: ${res.status}).`); }
+                    return data;
+                } catch (error) {
+                    throw error instanceof Error ? error : new Error("An unknown network or parsing error occurred.");
                 }
-                const response = await fetch(url, options);
-                const contentType = response.headers.get("content-type");
-                if (response.status === 401 || (contentType && !contentType.includes("application/json"))) {
-                    alert("Session expired or invalid. The page will now reload.");
-                    window.location.reload();
-                    throw new Error("Invalid session.");
-                }
-                const data = await response.json();
-                if (!response.ok) throw new Error(data.message || `An unknown error occurred (Status: ${response.status}).`);
-                return data;
             },
-            async fetchPeers() {
-                try { this.peers = (await this.apiRequest('/api/data')).peers; } 
-                catch (e) { console.error("Failed to fetch peers:", e.message); }
+            
+            async fetchData() { try { const data = await this.apiRequest('/api/data'); this.peers = data.peers.map(p => ({...p, status: p.state === 'installed' ? 'Pinging...' : 'Pending', restarting: false})); this.mainServerIp = data.main_server_ip; this.mainServerPrivateIp = data.main_server_private_ip; this.updateAllPingStatus(); } catch (e) { this.showNotification(e.message, 'error'); } },
+            async updateAllPingStatus() { this.peers.filter(p => p.state === 'installed' && p.ip).forEach(p => { this.apiRequest(`/api/ping/${p.ip}`).then(data => { const peer = this.peers.find(i => i.ip === p.ip); if(peer) peer.status = data.status; }).catch(() => { const peer = this.peers.find(i => i.ip === p.ip); if(peer) peer.status = 'Offline'; }); }); },
+            
+            async restartPeer(peer) {
+                if(peer.restarting) return;
+                peer.restarting = true;
+                peer.status = 'Pinging...';
+                try {
+                    const data = await this.apiRequest('/api/restart_peer', 'POST', { public_ip: peer.public_ip });
+                    this.showNotification(data.message, 'success');
+                    setTimeout(() => this.updateAllPingStatus(), 3000); 
+                } catch (e) { this.showNotification('Error: ' + e.message, 'error'); this.fetchData();
+                } finally { setTimeout(() => { const p = this.peers.find(i => i.public_ip === peer.public_ip); if(p) p.restarting = false; }, 3000); }
             },
+
             async verifyAndAddPeer() {
                 this.addForm.loading = true; this.addForm.error = '';
                 try {
                     const data = await this.apiRequest('/api/verify_and_add', 'POST', this.addForm);
-                    alert(data.message);
-                    this.modals.addPeer = false;
-                    this.addForm = { f_ip: '', s_port: 22, s_user: 'root', s_pass: '', loading: false, error: '' };
-                    this.fetchPeers();
+                    this.showNotification(data.message, 'success');
+                    this.modals.addPeer = false; this.addForm = { f_ip: '', s_port: 22, s_user: 'root', s_pass: '', loading: false, error: '' };
+                    this.fetchData();
                 } catch (e) { this.addForm.error = e.message; } finally { this.addForm.loading = false; }
             },
-            async installPeer(peer) {
-                this.log.title = `Installing on ${peer.public_ip}...`;
-                this.log.output = 'Requesting installation start...';
-                this.log.running = true;
-                this.modals.log = true;
-                try {
-                    await this.apiRequest('/api/install', 'POST', { public_ip: peer.public_ip });
-                    this.log.poller = setInterval(() => this.fetchLog(peer.public_ip), 2000);
-                } catch (e) {
-                    this.log.output += '\n\n[ERROR] Could not start installation: ' + e.message;
-                    this.log.running = false;
-                }
-            },
-            async fetchLog(public_ip) {
-                try {
-                    const data = await this.apiRequest(`/api/log/${public_ip}`);
-                    this.log.output = data.log;
-                    
-                    this.$nextTick(() => {
-                        const logEl = this.$el.querySelector('.log-output');
-                        if (logEl) logEl.scrollTop = logEl.scrollHeight;
-                    });
-
-                    if (data.status === 'done') {
-                        this.stopLogPolling(true);
-                    } else if (data.status === 'error') {
-                        this.stopLogPolling(false);
-                    }
-                } catch (e) {
-                    this.log.output += "\n\nError fetching log: connection to server lost.";
-                    this.stopLogPolling(false);
-                }
-            },
-            stopLogPolling(closeModal = true) {
-                if (this.log.poller) clearInterval(this.log.poller);
-                this.log.poller = null;
-                this.log.running = false;
-                if (closeModal) {
-                    this.modals.log = false;
-                    this.log.output = '';
-                }
-                this.fetchPeers();
-            },
+            
             async removePeer(peer) {
-                if (!confirm(`Are you sure you want to remove peer ${peer.public_ip}? This is irreversible.`)) return;
                 try {
                     const data = await this.apiRequest('/peers/remove', 'POST', { public_ip: peer.public_ip });
-                    alert(data.message);
-                    this.fetchPeers();
-                } catch(e) { alert('Error removing peer: ' + e.message); }
-            }
+                    this.showNotification(data.message, 'success');
+                    this.fetchData();
+                } catch(e) { this.showNotification('Error: ' + e.message, 'error'); }
+            },
+
+            installPeer(peer) {
+                this.log.peerIp = peer.public_ip; this.log.steps = [ { id: 1, text: 'Cleaning up remote server', status: 'pending', keyword: 'Step 1/6' }, { id: 2, text: 'Installing dependencies', status: 'pending', keyword: 'Step 3/6' }, { id: 3, text: 'Writing configuration', status: 'pending', keyword: 'Step 5/6' }, { id: 4, text: 'Starting remote service', status: 'pending', keyword: 'Step 6/6' }, { id: 5, text: 'Verifying handshake', status: 'pending', keyword: 'Handshake successful' }, { id: 6, text: 'Verifying data transfer (Ping)', status: 'pending', keyword: 'Ping successful' } ];
+                this.log.rawOutput = 'Requesting installation start...'; this.modals.log = true;
+                this.apiRequest('/api/install', 'POST', { public_ip: peer.public_ip }).then(() => this.log.poller = setInterval(() => this.fetchLog(peer.public_ip), 2000)).catch(e => { this.log.rawOutput += `\n[ERROR] Start failed: ${e.message}`; this.showNotification(e.message, 'error'); });
+            },
+            
+            async fetchLog(public_ip) {
+                try {
+                    const data = await this.apiRequest(`/api/log/${public_ip}`); this.log.rawOutput = data.log; let currentStep = -1;
+                    this.log.steps.forEach((step, i) => { if (step.status !== 'success') { if (data.log.includes(step.keyword)) { step.status = 'success'; currentStep = i; } } });
+                    if(currentStep > -1 && currentStep + 1 < this.log.steps.length){ this.log.steps[currentStep + 1].status = 'running'; } 
+                    else if (this.log.steps[0].status === 'pending' && data.log.includes('Step 1/6')) { this.log.steps[0].status = 'running'; }
+                    if (data.status === 'done') { this.log.steps.forEach(s => s.status = 'success'); setTimeout(() => this.closeLogModal(), 1500);
+                    } else if (data.status === 'error') { const runningStep = this.log.steps.find(s => s.status === 'running'); if(runningStep) runningStep.status = 'error'; clearInterval(this.log.poller); this.log.poller = null; }
+                } catch (e) {
+                    this.log.rawOutput += "\n\nError fetching log."; const runningStep = this.log.steps.find(s => s.status === 'running'); if(runningStep) runningStep.status = 'error'; clearInterval(this.log.poller); this.log.poller = null;
+                }
+            },
+            
+            closeLogModal() { if (this.log.poller) clearInterval(this.log.poller); this.log.poller = null; this.modals.log = false; this.fetchData(); },
+            getStepIcon(status) { if (status === 'running') return `<svg class="animate-spin text-blue-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>`; if (status === 'success') return `<svg class="text-green-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg>`; if (status === 'error') return `<svg class="text-red-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" /></svg>`; return `<svg class="text-gray-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><circle cx="12" cy="12" r="10" stroke-width="2" class="stroke-current opacity-50" /><path d="M12,2 a10,10 0 0,0 0,20" class="stroke-current" /></svg>`; }
         }));
     });
     </script>
@@ -743,12 +664,44 @@ EOF
 EOF
 
     cat << 'EOF' > $APP_DIR/templates/login.html
-<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Login - WG Panel Manager</title><script src="https://cdn.tailwindcss.com"></script></head><body class="bg-gray-900 flex items-center justify-center min-h-screen"><div class="bg-gray-800 p-8 rounded-lg shadow-xl w-full max-w-sm border border-gray-700"><h2 class="text-2xl font-bold text-white text-center mb-6">Panel Login</h2>{% with messages = get_flashed_messages() %}{% if messages %}<div class="bg-red-500/80 border border-red-400 text-white p-3 rounded mb-4 text-center">{{ messages[0] }}</div>{% endif %}{% endwith %}<form method="POST" action="/login"><div class="mb-4"><label for="username" class="block text-gray-300 mb-2">Username</label><input type="text" name="username" id="username" class="w-full bg-gray-700 text-white rounded p-2 border border-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500" required></div><div class="mb-6"><label for="password" class="block text-gray-300 mb-2">Password</label><input type="password" name="password" id="password" class="w-full bg-gray-700 text-white rounded p-2 border border-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500" required></div><button type="submit" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg transition">Login</button></form></div></body></html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login - WG Panel Ultimate</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-900 flex items-center justify-center min-h-screen">
+    <div class="absolute top-0 left-0 w-full h-full bg-gradient-to-br from-gray-900 to-black -z-10"></div>
+    <div class="bg-gray-800/50 backdrop-filter backdrop-blur-lg border border-gray-700 p-8 rounded-xl shadow-2xl w-full max-w-sm">
+        <div class="flex justify-center mb-6">
+             <svg class="w-16 h-16 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg>
+        </div>
+        <h2 class="text-2xl font-bold text-white text-center mb-6">Panel Login</h2>
+        {% with messages = get_flashed_messages() %}
+            {% if messages %}
+                <div class="bg-red-500/80 border border-red-400 text-white p-3 rounded mb-4 text-center">{{ messages[0] }}</div>
+            {% endif %}
+        {% endwith %}
+        <form method="POST" action="/login">
+            <div class="mb-4">
+                <label for="username" class="block text-gray-300 mb-2">Username</label>
+                <input type="text" name="username" id="username" class="w-full bg-gray-900/70 text-white rounded-lg p-3 border border-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500 transition" required>
+            </div>
+            <div class="mb-6">
+                <label for="password" class="block text-gray-300 mb-2">Password</label>
+                <input type="password" name="password" id="password" class="w-full bg-gray-900/70 text-white rounded-lg p-3 border border-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500 transition" required>
+            </div>
+            <button type="submit" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-lg transition transform hover:scale-105">Login</button>
+        </form>
+    </div>
+</body>
+</html>
 EOF
 
-    # --- Finalize Setup ---
     print_info "Step 6: Finalizing Setup..."
-    # Systemd Service
+    
     if [ "$IS_UBUNTU_24" = true ]; then
         EXEC_START_CMD="$APP_DIR/venv/bin/gunicorn --workers 2 --bind 127.0.0.1:$FLASK_PORT app:app"
     else
@@ -770,7 +723,6 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
-    # Nginx Config
     cat << EOF > $NGINX_CONF
 server {
     listen $PANEL_PORT;
@@ -787,7 +739,6 @@ EOF
     rm -f /etc/nginx/sites-enabled/default
     ln -s -f $NGINX_CONF /etc/nginx/sites-enabled/
     
-    # Start services
     print_info "Reloading daemons and starting services..."
     systemctl daemon-reload
     systemctl restart $SERVICE_NAME
@@ -814,6 +765,8 @@ uninstall_panel_silent() {
     systemctl daemon-reload
     print_info "Cleanup complete."
 }
+
+
 
 show_menu() {
     clear
