@@ -134,7 +134,7 @@ WG_PORT = "6464"
 IRAN_PUBLIC_IP_FILE = "/etc/wireguard/iran_public_ip.txt"
 
 class Logger:
-    def __init__(self, log_file_path): self.log_file = open(log_file_path, 'w')
+    def __init__(self, log_file_path): self.log_file = open(log_file_path, 'a')
     def log(self, message, is_error=False):
         prefix = "[ERROR]" if is_error else "[INFO]"
         full_message = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {prefix} {message}\n"
@@ -277,11 +277,12 @@ def main():
         try:
             run_cmd(f"ping -c 3 -W 5 {peer_data['ip']}")
             logger.log("Ping successful! End-to-end connection is truly Active.")
+            peer_data['status_note'] = '' # Clear any previous notes
         except Exception as e:
-            logger.log("Ping test FAILED. Rolling back...", is_error=True)
-            run_cmd(f"wg set {WG_INTERFACE} peer \"{peer_data['pubkey']}\" remove")
-            run_cmd(f"wg-quick save {WG_INTERFACE}")
-            raise Exception("Ping failed. Handshake OK, but data packets are blocked. Check FORWARD rules in iptables on the remote server.")
+            error_reason = "Ping failed. Check firewall/iptables rules on both servers."
+            logger.log(f"!!! PING TEST FAILED. {error_reason}", is_error=False)
+            logger.log("The peer will be added as 'Offline'. Use the 'Restart Connection' button or check the error note on the dashboard.", is_error=False)
+            peer_data['status_note'] = error_reason
 
         peer_data['state'] = 'installed'
         
@@ -295,7 +296,7 @@ def main():
                 f.flush(); os.fsync(f.fileno())
             finally: fcntl.flock(f, fcntl.LOCK_UN)
 
-        logger.done("Installation successful!")
+        logger.done("Installation successful! Peer has been configured.")
     except Exception as e:
         logger.error(f"FATAL: {str(e)}")
 
@@ -420,6 +421,10 @@ def restart_peer():
             raise Exception(f"Failed to restart remote service: {stderr.read().decode()}")
         ssh.close()
         
+        if 'status_note' in peer:
+            peer['status_note'] = ''
+            save_peers(peers)
+            
         return jsonify({'message': 'Restart signal sent to both servers successfully.'})
     except Exception as e:
         return jsonify({'message': f'An error occurred: {str(e)}'}), 500
@@ -434,7 +439,7 @@ def verify_and_add():
         ssh = paramiko.SSHClient(); ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         ssh.connect(ip, port=int(port), username=user, password=password, timeout=20); ssh.close()
     except Exception as e: return jsonify({'message': f'SSH connection failed: {e}'}), 500
-    new_peer = {"public_ip": ip, "ssh_port": port, "ssh_user": user, "ssh_pass": password, "state": "pending"}
+    new_peer = {"public_ip": ip, "ssh_port": port, "ssh_user": user, "ssh_pass": password, "state": "pending", "status_note": ""}
     peers.append(new_peer); save_peers(peers)
     return jsonify({'message': 'SSH verified. Peer added in "Pending" state.'})
 
@@ -503,29 +508,24 @@ EOF
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
     <style>
         @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-        @keyframes toastIn { from { opacity: 0; transform: translateY(-20px); } to { opacity: 1; transform: translateY(0); } }
-        @keyframes toastOut { from { opacity: 1; transform: translateY(0); } to { opacity: 0; transform: translateY(-20px); } }
         .fade-in { animation: fadeIn 0.5s ease-out forwards; }
         [x-cloak] { display: none !important; }
-        .glass-card { background: rgba(31, 41, 55, 0.5); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.1); }
-        .status-badge .dot { width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
-        .log-step { display: flex; align-items: center; padding: 0.75rem 0; border-bottom: 1px solid #374151; transition: all 0.3s ease; }
-        .log-step.status-success { color: #4ade80; } .log-step.status-error { color: #f87171; }
-        .log-step.status-pending { color: #9ca3af; } .log-step.status-running { color: #60a5fa; }
-        .log-step-icon { width: 24px; height: 24px; margin-right: 1rem; }
+
+        .glass-card { 
+            background: rgba(31, 41, 55, 0.5); 
+            backdrop-filter: blur(10px); 
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            transition: all 0.3s ease;
+        }
+        .status-border-online { border-left: 4px solid #4ade80; }
+        .status-border-offline { border-left: 4px solid #f87171; }
+        .status-border-pending { border-left: 4px solid #facc15; }
+        .status-border-pinging { border-left: 4px solid #60a5fa; }
     </style>
 </head>
 <body class="bg-gray-900 text-gray-200" x-data="wireguardManager()" x-cloak>
     
     <div class="absolute top-0 left-0 w-full h-full bg-gradient-to-br from-gray-900 to-black -z-10"></div>
-
-    <div x-show="notification.show" 
-         class="fixed top-5 right-5 z-[100] flex items-center p-4 max-w-sm text-white rounded-lg shadow-lg glass-card"
-         :class="{ 'border-green-400': notification.type === 'success', 'border-red-400': notification.type === 'error' }"
-         x-transition:enter="toastIn 0.3s ease-out" x-transition:leave="toastOut 0.3s ease-in">
-        <div x-text="notification.message"></div>
-        <button @click="notification.show = false" class="ml-4 text-xl">&times;</button>
-    </div>
 
     <div class="container mx-auto p-4 md:p-8">
         <header class="flex flex-col sm:flex-row justify-between items-center mb-8 pb-4 border-b border-gray-700/50">
@@ -533,46 +533,77 @@ EOF
                 <svg class="w-8 h-8 mr-3 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg>
                 WG Panel Ultimate
             </h1>
-            <div class="flex items-center space-x-4"><div class="text-right"><div class="text-xs text-gray-400">Main Server (Public / Private)</div><div class="font-mono text-sm"><span x-text="mainServerIp"></span> / <span x-text="mainServerPrivateIp"></span></div></div><a href="/logout" class="text-gray-400 hover:text-white transition" title="Logout"><i class="bi bi-box-arrow-right text-2xl"></i></a></div>
+            <div class="flex items-center space-x-4">
+                <div class="text-right">
+                    <div class="text-xs text-gray-400">Main Server (Public / Private)</div>
+                    <div class="font-mono text-sm">
+                        <span x-text="mainServerIp"></span> / <span x-text="mainServerPrivateIp"></span>
+                    </div>
+                </div>
+                <a href="/logout" class="text-gray-400 hover:text-white transition" title="Logout"><i class="bi bi-box-arrow-right text-2xl"></i></a>
+            </div>
         </header>
 
         <main>
             <div class="flex justify-end mb-6"><button @click="modals.addPeer = true" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg transition flex items-center shadow-lg transform hover:scale-105"><i class="bi bi-plus-circle mr-2"></i> Add New Server</button></div>
             <div x-show="peers.length === 0" class="text-center text-gray-500 py-16 fade-in"><i class="bi bi-hdd-network text-6xl mb-4"></i><p>No foreign servers have been added yet.</p></div>
-            <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+            
+            <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-6">
                 <template x-for="(peer, index) in peers" :key="peer.public_ip">
-                    <div class="glass-card rounded-xl shadow-lg p-5 flex flex-col justify-between hover:border-blue-400 transition fade-in" :style="`animation-delay: ${index * 100}ms`">
-                        <div>
-                            <div class="flex justify-between items-start mb-4"><div><p class="text-xs text-gray-400">Public IP</p><p class="font-bold text-lg font-mono text-white" x-text="peer.public_ip"></p></div><div class="flex items-center text-xs font-semibold px-2 py-1 rounded-full" :class="{ 'bg-green-500/10 text-green-400': peer.status === 'Online', 'bg-red-500/10 text-red-400': peer.status === 'Offline', 'bg-yellow-500/10 text-yellow-400': peer.status === 'Pending', 'bg-blue-500/10 text-blue-400': peer.status === 'Pinging...' }"><span class="dot" :class="{ 'bg-green-400': peer.status === 'Online', 'bg-red-400': peer.status === 'Offline', 'bg-yellow-400': peer.status === 'Pending', 'bg-blue-400 animate-pulse': peer.status === 'Pinging...' }"></span><span x-text="peer.status"></span></div></div>
-                            <p class="text-xs text-gray-400">Private IP</p><p class="font-mono bg-gray-900/50 inline-block px-2 py-1 rounded" x-text="peer.ip || 'N/A'"></p>
+                    <div class="glass-card rounded-lg p-4 flex flex-col space-y-4 fade-in" 
+                        :class="{ 'status-border-online': peer.status === 'Online', 'status-border-offline': peer.status === 'Offline', 'status-border-pending': peer.status === 'Pending', 'status-border-pinging': peer.status === 'Pinging...' }"
+                        :style="`animation-delay: ${index * 80}ms`">
+                        
+                        <div class="flex justify-between items-center">
+                            <div class="flex items-center space-x-2 text-sm font-semibold">
+                                <div class="w-2.5 h-2.5 rounded-full" :class="{ 'bg-green-400': peer.status === 'Online', 'bg-red-500': peer.status === 'Offline', 'bg-yellow-400': peer.status === 'Pending', 'bg-blue-400 animate-pulse': peer.status === 'Pinging...' }"></div>
+                                <span x-text="peer.status"></span>
+                            </div>
+                            <div class="flex items-center space-x-3">
+                                <template x-if="peer.state === 'pending'"><button @click="installPeer(peer)" class="text-gray-400 hover:text-green-400 transition" title="Install"><i class="bi bi-download text-lg"></i></button></template>
+                                <template x-if="peer.state === 'installed'"><button @click="showConfirm('Restart Connection?', `This will restart the WireGuard service on both servers.`, () => restartPeer(peer))" :disabled="peer.restarting" class="text-gray-400 hover:text-blue-400 transition disabled:opacity-50" title="Restart Connection"><i class="bi bi-arrow-repeat text-lg" :class="{'animate-spin': peer.restarting}"></i></button></template>
+                                <button @click="showConfirm('Remove Peer?', `This will permanently remove ${peer.public_ip}.`, () => removePeer(peer))" class="text-gray-400 hover:text-red-400 transition" title="Remove"><i class="bi bi-trash text-lg"></i></button>
+                            </div>
                         </div>
-                        <div class="mt-6 flex justify-end items-center space-x-2 border-t border-gray-700/50 pt-4">
-                            <template x-if="peer.state === 'installed'"><button @click="showConfirm('Restart Connection?', `This will restart the WireGuard service on both the main server and ${peer.public_ip}.`, () => restartPeer(peer))" :disabled="peer.restarting" class="text-gray-400 hover:text-blue-400 transition p-2 rounded-full disabled:opacity-50 disabled:cursor-not-allowed" title="Restart Connection"><svg x-show="peer.restarting" class="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg><i x-show="!peer.restarting" class="bi bi-arrow-repeat text-xl"></i></button></template>
-                            <template x-if="peer.state === 'pending'"><button @click="installPeer(peer)" class="text-gray-400 hover:text-green-400 transition p-2 rounded-full" title="Install"><i class="bi bi-download text-xl"></i></button></template>
-                            <button @click="showConfirm('Remove Peer?', `This will permanently remove ${peer.public_ip} and its configuration. This action cannot be undone.`, () => removePeer(peer))" class="text-gray-400 hover:text-red-400 transition p-2 rounded-full" title="Remove"><i class="bi bi-trash text-xl"></i></button>
+
+                        <div class="flex-grow space-y-3">
+                           <div class="flex items-center justify-between">
+                                <div class="flex items-center space-x-2.5">
+                                    <i class="bi bi-globe text-gray-400"></i>
+                                    <span class="font-mono text-white" x-text="peer.public_ip"></span>
+                                </div>
+                                <button @click="copyToClipboard(peer.public_ip)" class="text-gray-500 hover:text-white">
+                                    <i class="bi" :class="copiedIp === peer.public_ip ? 'bi-check-lg text-green-400' : 'bi-clipboard'"></i>
+                                </button>
+                           </div>
+                           <div class="flex items-center justify-between" x-show="peer.ip">
+                                <div class="flex items-center space-x-2.5">
+                                    <i class="bi bi-shield-lock text-gray-400"></i>
+                                    <span class="font-mono text-white" x-text="peer.ip"></span>
+                                </div>
+                                <button @click="copyToClipboard(peer.ip)" class="text-gray-500 hover:text-white">
+                                    <i class="bi" :class="copiedIp === peer.ip ? 'bi-check-lg text-green-400' : 'bi-clipboard'"></i>
+                                </button>
+                           </div>
                         </div>
+                        
+                        <template x-if="peer.status === 'Offline' && peer.status_note">
+                            <div class="border-t border-red-500/20 pt-3 flex items-start space-x-2 text-red-300 text-xs">
+                                <i class="bi bi-exclamation-triangle mt-0.5"></i>
+                                <p x-text="peer.status_note"></p>
+                            </div>
+                        </template>
+
                     </div>
                 </template>
             </div>
         </main>
     </div>
+    
+    <div x-show="modals.addPeer" @keydown.escape.window="modals.addPeer = false" class="fixed inset-0 z-50 flex items-center justify-center p-4" x-cloak><div @click="modals.addPeer = false" class="fixed inset-0 bg-black/70 backdrop-blur-sm"></div><div class="glass-card rounded-xl shadow-lg p-6 w-full max-w-md z-20"><h3 class="text-lg font-bold mb-4 text-white">Add & Verify Server</h3><div x-show="addForm.error" class="bg-red-500/20 border border-red-500 text-red-300 p-3 rounded mb-4" x-text="addForm.error"></div><form @submit.prevent="verifyAndAddPeer"><div class="mb-3"><label class="block text-sm text-gray-300">Foreign IP</label><input type="text" x-model="addForm.f_ip" class="w-full bg-gray-900/50 border border-gray-600 rounded p-2 mt-1 text-white focus:outline-none focus:ring-2 focus:ring-blue-500" required></div><div class="mb-3"><label class="block text-sm text-gray-300">SSH Port</label><input type="number" x-model="addForm.s_port" class="w-full bg-gray-900/50 border border-gray-600 rounded p-2 mt-1 text-white focus:outline-none focus:ring-2 focus:ring-blue-500" required></div><div class="mb-3"><label class="block text-sm text-gray-300">SSH User</label><input type="text" x-model="addForm.s_user" class="w-full bg-gray-900/50 border border-gray-600 rounded p-2 mt-1 text-white focus:outline-none focus:ring-2 focus:ring-blue-500" required></div><div class="mb-3"><label class="block text-sm text-gray-300">SSH Pass</label><input type="password" x-model="addForm.s_pass" class="w-full bg-gray-900/50 border border-gray-600 rounded p-2 mt-1 text-white focus:outline-none focus:ring-2 focus:ring-blue-500" required></div><div class="flex justify-end items-center mt-4"><button type="button" @click="modals.addPeer = false" class="bg-gray-600/50 hover:bg-gray-500/50 text-white px-4 py-2 rounded-lg mr-2 transition">Cancel</button><button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg flex items-center transition" :class="{'opacity-50': addForm.loading}" :disabled="addForm.loading"><span x-show="addForm.loading" class="animate-spin mr-2 inline-block w-4 h-4 border-2 rounded-full border-t-transparent"></span>Verify & Add</button></div></form></div></div>
+    <div x-show="confirmModal.show" @keydown.escape.window="confirmModal.show = false" class="fixed inset-0 z-50 flex items-center justify-center p-4" x-cloak><div @click="confirmModal.show = false" class="fixed inset-0 bg-black/70 backdrop-blur-sm"></div><div class="glass-card rounded-xl shadow-lg p-6 w-full max-w-sm z-20"><h3 class="text-lg font-bold mb-2 text-white" x-text="confirmModal.title"></h3><p class="text-gray-300 mb-6" x-text="confirmModal.message"></p><div class="flex justify-end items-center"><button @click="confirmModal.show = false" class="bg-gray-600/50 hover:bg-gray-500/50 text-white px-4 py-2 rounded-lg mr-2 transition">Cancel</button><button @click="confirmModal.onConfirm(); confirmModal.show = false;" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg transition">Confirm</button></div></div></div>
+    <div x-show="modals.log" @keydown.escape.window="closeLogModal()" class="fixed inset-0 z-50 flex items-center justify-center p-4" x-cloak><div @click="closeLogModal()" class="fixed inset-0 bg-black/70 backdrop-blur-sm"></div><div class="bg-gray-800 rounded-lg shadow-xl w-full max-w-2xl z-20 border border-gray-700 max-h-[90vh] flex flex-col"><div class="flex justify-between items-center p-4 border-b border-gray-700"><h5 class="font-bold text-white" x-text="`Installation on ${log.peerIp}`"></h5><button @click="closeLogModal()" class="text-gray-400 hover:text-white">&times;</button></div><div class="p-6 overflow-y-auto"><ul><template x-for="step in log.steps" :key="step.id"><li class="flex items-center py-3 border-b border-gray-700 last:border-b-0"><div class="w-6 h-6 mr-4" x-html="getStepIcon(step.status)"></div><span class="font-semibold" x-text="step.text" :class="{'text-green-400': step.status === 'success', 'text-red-400': step.status === 'error', 'text-blue-400': step.status === 'running', 'text-gray-400': step.status === 'pending'}"></span></li></template></ul></div><div class="p-4 border-t border-gray-700"><button @click="log.showRaw = !log.showRaw" class="text-xs text-gray-400 hover:text-white">Toggle Raw Log</button><div x-show="log.showRaw" x-collapse><pre class="mt-2 text-xs bg-black p-2 rounded max-h-48 overflow-y-auto" x-text="log.rawOutput"></pre></div></div></div></div>
 
-    <div x-show="confirmModal.show" @keydown.escape.window="confirmModal.show = false" class="fixed inset-0 z-50 flex items-center justify-center p-4" x-cloak>
-        <div @click="confirmModal.show = false" class="fixed inset-0 bg-black/70 backdrop-blur-sm"></div>
-        <div class="glass-card rounded-xl shadow-lg p-6 w-full max-w-sm z-20">
-            <h3 class="text-lg font-bold mb-2 text-white" x-text="confirmModal.title"></h3>
-            <p class="text-gray-300 mb-6" x-text="confirmModal.message"></p>
-            <div class="flex justify-end items-center"><button @click="confirmModal.show = false" class="bg-gray-600/50 hover:bg-gray-500/50 text-white px-4 py-2 rounded-lg mr-2 transition">Cancel</button><button @click="confirmModal.onConfirm(); confirmModal.show = false;" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg transition">Confirm</button></div>
-        </div>
-    </div>
-    
-    <div x-show="modals.log" @keydown.escape.window="closeLogModal()" class="fixed inset-0 z-50 flex items-center justify-center p-4" x-cloak>
-        <div @click="closeLogModal()" class="fixed inset-0 bg-black/70 backdrop-blur-sm"></div><div class="bg-gray-800 rounded-lg shadow-xl w-full max-w-2xl z-20 border border-gray-700 max-h-[90vh] flex flex-col"><div class="flex justify-between items-center p-4 border-b border-gray-700"><h5 class="font-bold text-white" x-text="`Installation on ${log.peerIp}`"></h5><button @click="closeLogModal()" class="text-gray-400 hover:text-white">&times;</button></div><div class="p-6 overflow-y-auto"><ul><template x-for="step in log.steps" :key="step.id"><li class="log-step" :class="`status-${step.status}`"><div class="log-step-icon" x-html="getStepIcon(step.status)"></div><span class="font-semibold" x-text="step.text"></span></li></template></ul></div><div class="p-4 border-t border-gray-700"><button @click="log.showRaw = !log.showRaw" class="text-xs text-gray-400 hover:text-white">Toggle Raw Log</button><div x-show="log.showRaw" x-collapse><pre class="mt-2 text-xs bg-black p-2 rounded max-h-48 overflow-y-auto" x-text="log.rawOutput"></pre></div></div></div>
-    </div>
-    <div x-show="modals.addPeer" @keydown.escape.window="modals.addPeer = false" class="fixed inset-0 z-50 flex items-center justify-center p-4" x-cloak>
-        <div @click="modals.addPeer = false" class="fixed inset-0 bg-black/70 backdrop-blur-sm"></div><div class="glass-card rounded-xl shadow-lg p-6 w-full max-w-md z-20"><h3 class="text-lg font-bold mb-4 text-white">Add & Verify Server</h3><div x-show="addForm.error" class="bg-red-500/20 border border-red-500 text-red-300 p-3 rounded mb-4" x-text="addForm.error"></div><form @submit.prevent="verifyAndAddPeer"><div class="mb-3"><label class="block text-sm text-gray-300">Foreign IP</label><input type="text" x-model="addForm.f_ip" class="w-full bg-gray-900/50 border border-gray-600 rounded p-2 mt-1 text-white focus:outline-none focus:ring-2 focus:ring-blue-500" required></div><div class="mb-3"><label class="block text-sm text-gray-300">SSH Port</label><input type="number" x-model="addForm.s_port" class="w-full bg-gray-900/50 border border-gray-600 rounded p-2 mt-1 text-white focus:outline-none focus:ring-2 focus:ring-blue-500" required></div><div class="mb-3"><label class="block text-sm text-gray-300">SSH User</label><input type="text" x-model="addForm.s_user" class="w-full bg-gray-900/50 border border-gray-600 rounded p-2 mt-1 text-white focus:outline-none focus:ring-2 focus:ring-blue-500" required></div><div class="mb-3"><label class="block text-sm text-gray-300">SSH Pass</label><input type="password" x-model="addForm.s_pass" class="w-full bg-gray-900/50 border border-gray-600 rounded p-2 mt-1 text-white focus:outline-none focus:ring-2 focus:ring-blue-500" required></div><div class="flex justify-end items-center mt-4"><button type="button" @click="modals.addPeer = false" class="bg-gray-600/50 hover:bg-gray-500/50 text-white px-4 py-2 rounded-lg mr-2 transition">Cancel</button><button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg flex items-center transition" :class="{'opacity-50': addForm.loading}" :disabled="addForm.loading"><span x-show="addForm.loading" class="animate-spin spinner mr-2 inline-block w-4 h-4 border-2 rounded-full"></span>Verify & Add</button></div></form></div>
-    </div>
-    
     <script>
     document.addEventListener('alpine:init', () => {
         Alpine.data('wireguardManager', () => ({
@@ -580,81 +611,98 @@ EOF
             modals: { addPeer: false, log: false },
             addForm: { f_ip: '', s_port: 22, s_user: 'root', s_pass: '', loading: false, error: '' },
             log: { peerIp: '', poller: null, rawOutput: '', showRaw: false, steps: [] },
-            notification: { show: false, message: '', type: 'success' },
             confirmModal: { show: false, title: '', message: '', onConfirm: () => {} },
+            copiedIp: null,
             
-            init() { this.fetchData(); },
+            init() { this.fetchData(); setInterval(() => this.updateAllPingStatus(), 30000); },
 
-            showNotification(message, type = 'success', duration = 4000) { this.notification.message = message; this.notification.type = type; this.notification.show = true; setTimeout(() => this.notification.show = false, duration); },
             showConfirm(title, message, onConfirmCallback) { this.confirmModal.title = title; this.confirmModal.message = message; this.confirmModal.onConfirm = onConfirmCallback; this.confirmModal.show = true; },
+            
+            copyToClipboard(text) {
+                if (!text) return;
+                if (!navigator.clipboard) {
+                    const textArea = document.createElement("textarea");
+                    textArea.value = text;
+                    textArea.style.position = "absolute";
+                    textArea.style.left = "-9999px";
+                    document.body.appendChild(textArea);
+                    textArea.select();
+                    try {
+                        document.execCommand('copy');
+                        this.copiedIp = text;
+                        setTimeout(() => { this.copiedIp = null; }, 2000);
+                    } catch (err) {
+                        console.error('Copy failed', err);
+                    }
+                    document.body.removeChild(textArea);
+                    return;
+                }
+                navigator.clipboard.writeText(text).then(() => {
+                    this.copiedIp = text;
+                    setTimeout(() => { this.copiedIp = null; }, 2000);
+                });
+            },
 
             async apiRequest(url, method = 'GET', body = null) {
                 try {
                     const res = await fetch(url, { method, headers: body ? {'Content-Type': 'application/json'} : {}, body: body ? JSON.stringify(body) : null });
                     if (res.status === 401) { window.location.reload(); throw new Error("Session expired."); }
-                    // Try to parse JSON, if it fails, throw an error with the text content
                     const text = await res.text();
                     const data = text ? JSON.parse(text) : {};
                     if (!res.ok) { throw new Error(data.message || `An unknown error occurred (Status: ${res.status}).`); }
                     return data;
-                } catch (error) {
-                    throw error instanceof Error ? error : new Error("An unknown network or parsing error occurred.");
-                }
+                } catch (error) { console.error(error); throw error; }
             },
             
-            async fetchData() { try { const data = await this.apiRequest('/api/data'); this.peers = data.peers.map(p => ({...p, status: p.state === 'installed' ? 'Pinging...' : 'Pending', restarting: false})); this.mainServerIp = data.main_server_ip; this.mainServerPrivateIp = data.main_server_private_ip; this.updateAllPingStatus(); } catch (e) { this.showNotification(e.message, 'error'); } },
-            async updateAllPingStatus() { this.peers.filter(p => p.state === 'installed' && p.ip).forEach(p => { this.apiRequest(`/api/ping/${p.ip}`).then(data => { const peer = this.peers.find(i => i.ip === p.ip); if(peer) peer.status = data.status; }).catch(() => { const peer = this.peers.find(i => i.ip === p.ip); if(peer) peer.status = 'Offline'; }); }); },
+            async fetchData() { try { const data = await this.apiRequest('/api/data'); this.peers = data.peers.map(p => ({...p, status: p.state === 'installed' ? 'Pinging...' : 'Pending', restarting: false})); this.mainServerIp = data.main_server_ip; this.mainServerPrivateIp = data.main_server_private_ip; this.updateAllPingStatus(); } catch (e) {} },
+            updateAllPingStatus() { this.peers.filter(p => p.state === 'installed' && p.ip).forEach(p => { this.apiRequest(`/api/ping/${p.ip}`).then(data => { const peer = this.peers.find(i => i.ip === p.ip); if(peer) peer.status = data.status; }).catch(() => { const peer = this.peers.find(i => i.ip === p.ip); if(peer) peer.status = 'Offline'; }); }); },
             
             async restartPeer(peer) {
                 if(peer.restarting) return;
                 peer.restarting = true;
-                peer.status = 'Pinging...';
                 try {
-                    const data = await this.apiRequest('/api/restart_peer', 'POST', { public_ip: peer.public_ip });
-                    this.showNotification(data.message, 'success');
-                    setTimeout(() => this.updateAllPingStatus(), 3000); 
-                } catch (e) { this.showNotification('Error: ' + e.message, 'error'); this.fetchData();
-                } finally { setTimeout(() => { const p = this.peers.find(i => i.public_ip === peer.public_ip); if(p) p.restarting = false; }, 3000); }
+                    await this.apiRequest('/api/restart_peer', 'POST', { public_ip: peer.public_ip });
+                    const localPeer = this.peers.find(p => p.public_ip === peer.public_ip);
+                    if(localPeer) localPeer.status_note = '';
+                    setTimeout(() => { peer.status = 'Pinging...'; this.updateAllPingStatus(); }, 2000); 
+                } catch (e) { 
+                } finally { setTimeout(() => { peer.restarting = false; }, 2000); }
             },
 
             async verifyAndAddPeer() {
                 this.addForm.loading = true; this.addForm.error = '';
                 try {
-                    const data = await this.apiRequest('/api/verify_and_add', 'POST', this.addForm);
-                    this.showNotification(data.message, 'success');
+                    await this.apiRequest('/api/verify_and_add', 'POST', this.addForm);
                     this.modals.addPeer = false; this.addForm = { f_ip: '', s_port: 22, s_user: 'root', s_pass: '', loading: false, error: '' };
                     this.fetchData();
                 } catch (e) { this.addForm.error = e.message; } finally { this.addForm.loading = false; }
             },
             
-            async removePeer(peer) {
-                try {
-                    const data = await this.apiRequest('/peers/remove', 'POST', { public_ip: peer.public_ip });
-                    this.showNotification(data.message, 'success');
-                    this.fetchData();
-                } catch(e) { this.showNotification('Error: ' + e.message, 'error'); }
-            },
+            async removePeer(peer) { try { await this.apiRequest('/peers/remove', 'POST', { public_ip: peer.public_ip }); this.fetchData(); } catch(e) {} },
 
             installPeer(peer) {
-                this.log.peerIp = peer.public_ip; this.log.steps = [ { id: 1, text: 'Cleaning up remote server', status: 'pending', keyword: 'Step 1/6' }, { id: 2, text: 'Installing dependencies', status: 'pending', keyword: 'Step 3/6' }, { id: 3, text: 'Writing configuration', status: 'pending', keyword: 'Step 5/6' }, { id: 4, text: 'Starting remote service', status: 'pending', keyword: 'Step 6/6' }, { id: 5, text: 'Verifying handshake', status: 'pending', keyword: 'Handshake successful' }, { id: 6, text: 'Verifying data transfer (Ping)', status: 'pending', keyword: 'Ping successful' } ];
-                this.log.rawOutput = 'Requesting installation start...'; this.modals.log = true;
-                this.apiRequest('/api/install', 'POST', { public_ip: peer.public_ip }).then(() => this.log.poller = setInterval(() => this.fetchLog(peer.public_ip), 2000)).catch(e => { this.log.rawOutput += `\n[ERROR] Start failed: ${e.message}`; this.showNotification(e.message, 'error'); });
+                this.log.peerIp = peer.public_ip;
+                this.log.steps = [ { id: 1, text: 'Cleaning up remote server', status: 'pending', keyword: 'Step 1/6' }, { id: 2, text: 'Installing dependencies', status: 'pending', keyword: 'Step 3/6' }, { id: 3, text: 'Writing configuration', status: 'pending', keyword: 'Step 5/6' }, { id: 4, text: 'Starting remote service', status: 'pending', keyword: 'Step 6/6' }, { id: 5, text: 'Verifying handshake', status: 'pending', keyword: 'Handshake successful' }, { id: 6, text: 'Verifying data transfer (Ping)', status: 'pending', keyword: 'Ping successful' } ];
+                this.log.rawOutput = 'Requesting installation start...';
+                this.modals.log = true;
+                this.apiRequest('/api/install', 'POST', { public_ip: peer.public_ip })
+                    .then(() => { if(this.log.poller === null) { this.log.poller = setInterval(() => this.fetchLog(peer.public_ip), 2000); } })
+                    .catch(e => { this.log.rawOutput += `\n[ERROR] Could not start installation: ${e.message}`; });
             },
             
             async fetchLog(public_ip) {
                 try {
                     const data = await this.apiRequest(`/api/log/${public_ip}`); this.log.rawOutput = data.log; let currentStep = -1;
-                    this.log.steps.forEach((step, i) => { if (step.status !== 'success') { if (data.log.includes(step.keyword)) { step.status = 'success'; currentStep = i; } } });
+                    this.log.steps.forEach((step, i) => { if (step.status !== 'success' && step.status !== 'error') { if (data.log.includes(step.keyword)) { step.status = 'success'; currentStep = i; } } });
                     if(currentStep > -1 && currentStep + 1 < this.log.steps.length){ this.log.steps[currentStep + 1].status = 'running'; } 
                     else if (this.log.steps[0].status === 'pending' && data.log.includes('Step 1/6')) { this.log.steps[0].status = 'running'; }
-                    if (data.status === 'done') { this.log.steps.forEach(s => s.status = 'success'); setTimeout(() => this.closeLogModal(), 1500);
-                    } else if (data.status === 'error') { const runningStep = this.log.steps.find(s => s.status === 'running'); if(runningStep) runningStep.status = 'error'; clearInterval(this.log.poller); this.log.poller = null; }
-                } catch (e) {
-                    this.log.rawOutput += "\n\nError fetching log."; const runningStep = this.log.steps.find(s => s.status === 'running'); if(runningStep) runningStep.status = 'error'; clearInterval(this.log.poller); this.log.poller = null;
-                }
+                    if (data.log.includes("PING TEST FAILED")) { const pingStep = this.log.steps.find(s => s.id === 6); if (pingStep) pingStep.status = 'error'; }
+                    if (data.status === 'done') { this.log.steps.forEach(s => { if (s.status === 'running' || s.status === 'pending') s.status = 'success'; }); if (this.log.poller) {clearInterval(this.log.poller); this.log.poller = null;} setTimeout(() => this.closeLogModal(), 2000);
+                    } else if (data.status === 'error') { const runningStep = this.log.steps.find(s => s.status === 'running'); if(runningStep) runningStep.status = 'error'; if (this.log.poller) {clearInterval(this.log.poller); this.log.poller = null;} }
+                } catch (e) { if (this.log.poller) {clearInterval(this.log.poller); this.log.poller = null;} }
             },
             
-            closeLogModal() { if (this.log.poller) clearInterval(this.log.poller); this.log.poller = null; this.modals.log = false; this.fetchData(); },
+            closeLogModal() { if (this.log.poller) {clearInterval(this.log.poller); this.log.poller = null;} this.modals.log = false; this.fetchData(); },
             getStepIcon(status) { if (status === 'running') return `<svg class="animate-spin text-blue-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>`; if (status === 'success') return `<svg class="text-green-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" /></svg>`; if (status === 'error') return `<svg class="text-red-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" /></svg>`; return `<svg class="text-gray-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor"><circle cx="12" cy="12" r="10" stroke-width="2" class="stroke-current opacity-50" /><path d="M12,2 a10,10 0 0,0 0,20" class="stroke-current" /></svg>`; }
         }));
     });
