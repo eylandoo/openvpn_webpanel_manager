@@ -159,7 +159,8 @@ modprobe tun
 
 
 ```bash
-wget -q -O /root/DejTunnel.sh https://raw.githubusercontent.com/eylandoo/openvpn_webpanel_manager/main/DejTunnel.sh && chmod +x /root/DejTunnel.sh && /root/DejTunnel.sh```
+wget -q -O /root/DejTunnel.sh https://raw.githubusercontent.com/eylandoo/openvpn_webpanel_manager/main/DejTunnel.sh && chmod +x /root/DejTunnel.sh && /root/DejTunnel.sh
+```
 
 
 
