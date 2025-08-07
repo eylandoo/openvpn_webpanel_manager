@@ -119,7 +119,7 @@ run_installation() {
     read -s -p "Enter a secure password for the admin: " ADMIN_PASS; echo
     echo ""
     read -p "Enter a name for your Tinc network (e.g., myvpn): " TINC_NET_NAME
-    read -p "Enter a name for this main server (e.g., iran-server): " TINC_NODE_NAME
+    read -p "Enter a name for this main server (e.g., iranserver): " TINC_NODE_NAME
     read -p "Enter the private IP for this main server (e.g., 10.20.0.1): " TINC_PRIVATE_IP
     read -p "Enter the subnet mask (e.g., 255.255.255.0): " TINC_NETMASK
 
@@ -241,17 +241,29 @@ def add_node_task(task_id,form_data):
         net_name, node_name_main, netmask = main_network.net_name, main_network.main_node_name, main_network.subnet_mask
         hosts_dir, clients_dir = f"/etc/tinc/{net_name}/hosts", "/etc/tinc/clients_info"
         ssh_opts = ["-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10"]
-        log(f"-> [1/6] Cleaning up remote and configuring Tinc...")
+        log(f"-> [1/7] Cleaning up remote...")
         cleanup_script = f"if [ -d /etc/tinc/{net_name} ]; then sudo {CMD_RM} -rf /etc/tinc/{net_name} && echo 'Previous config found and removed.'; else echo 'No previous config found, skipping cleanup.'; fi"
         subprocess.run([CMD_SSHPASS,"-p",ssh_pass,CMD_SSH,*ssh_opts,f"{ssh_user}@{public_ip}",cleanup_script],capture_output=True,text=True,timeout=60)
-        log(f"-> [2/6] Configuring remote server...")
+        
+        log(f"-> [2/7] Configuring remote server...")
         remote_script=f"""set -e
-if ! command -v tincd &> /dev/null
-then
-    echo "Tinc not found. Attempting direct installation without update..."
-    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y tinc
+# --- START: Added Prerequisite Checks ---
+echo "--> Checking for TUN device availability..."
+if [ ! -c /dev/net/tun ]; then
+    echo "    - /dev/net/tun not found. Attempting to load kernel module..."
+    sudo modprobe tun || echo "    - WARNING: Could not load TUN module. This may be a container limitation. Continuing..."
 else
-    echo "Tinc is already installed. Skipping installation."
+    echo "    - TUN device is available."
+fi
+echo "--> Checking for dependencies (tinc, net-tools)..."
+# --- END: Added Prerequisite Checks ---
+if ! command -v tincd &> /dev/null || ! command -v ifconfig &> /dev/null; then
+    echo "    - A dependency is missing. Installing/updating..."
+    sudo DEBIAN_FRONTEND=noninteractive apt-get update -y > /dev/null
+    # --- MODIFIED: Added net-tools to the installation ---
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y tinc net-tools
+else
+    echo "    - All dependencies are already installed."
 fi
 mkdir -p /etc/tinc/{net_name}/hosts;
 echo "Name = {node_name}" | sudo tee /etc/tinc/{net_name}/tinc.conf > /dev/null
@@ -266,27 +278,33 @@ echo "Address = {public_ip}" | sudo tee -a /etc/tinc/{net_name}/hosts/{node_name
 echo "Subnet = {private_ip}/32" | sudo tee -a /etc/tinc/{net_name}/hosts/{node_name} > /dev/null
 """
         subprocess.run([CMD_SSHPASS,"-p",ssh_pass,CMD_SSH,*ssh_opts,f"{ssh_user}@{public_ip}",remote_script],check=True,capture_output=True,text=True,timeout=300)
-        log(f"-> [3/6] Exchanging host files...")
+        
+        log(f"-> [3/7] Exchanging host files...")
         subprocess.run([CMD_SSHPASS,"-p",ssh_pass,CMD_SCP,*ssh_opts,f"{ssh_user}@{public_ip}:{hosts_dir}/{node_name}",f"{hosts_dir}/"],check=True,capture_output=True,text=True,timeout=30)
         subprocess.run([CMD_SSHPASS,"-p",ssh_pass,CMD_SCP,*ssh_opts,f"{hosts_dir}/{node_name_main}",f"{ssh_user}@{public_ip}:{hosts_dir}/"],check=True,capture_output=True,text=True,timeout=30)
-        log(f"-> [4/6] Creating full mesh...")
+        
+        log(f"-> [4/7] Creating full mesh...")
         for node in existing_nodes:
             log(f"  - Updating {node.name} and restarting...")
             subprocess.run([CMD_SSHPASS,"-p",node.ssh_pass,CMD_SCP,*ssh_opts,f"{hosts_dir}/{node_name}",f"{node.ssh_user}@{node.public_ip}:{hosts_dir}/"],check=True,capture_output=True,text=True,timeout=30)
             subprocess.run([CMD_SSHPASS,"-p",ssh_pass,CMD_SCP,*ssh_opts,f"{hosts_dir}/{node.name}",f"{ssh_user}@{public_ip}:{hosts_dir}/"],check=True,capture_output=True,text=True,timeout=30)
             subprocess.run([CMD_SSHPASS,"-p",node.ssh_pass,CMD_SSH,*ssh_opts,f"{node.ssh_user}@{node.public_ip}",f"sudo {CMD_SYSTEMCTL} restart tinc@{net_name}"],check=True,capture_output=True,text=True,timeout=30)
-        log(f"-> [5/6] Finalizing services...")
+        
+        log(f"-> [5/7] Finalizing services...")
         with open(f"{clients_dir}/{node_name}","w") as f: f.write(f"IP_PUBLIC={public_ip}\\nUSER={ssh_user}\\nPASS='{ssh_pass}'\\n")
         subprocess.run([CMD_SSHPASS,"-p",ssh_pass,CMD_SSH,*ssh_opts,f"{ssh_user}@{public_ip}",f"sudo {CMD_SYSTEMCTL} enable tinc@{net_name} && sudo {CMD_SYSTEMCTL} restart tinc@{net_name}"],check=True,capture_output=True,text=True,timeout=30)
         subprocess.run([CMD_SUDO,CMD_SYSTEMCTL,"restart",f"tinc@{net_name}"],check=True)
-        log("-> [6/6] Saving to database...")
+        
+        log("-> [6/7] Saving to database...")
         with app.app_context():
             db.session.add(RemoteNode(name=node_name,public_ip=public_ip,private_ip=private_ip,ssh_user=ssh_user,ssh_pass=ssh_pass))
             db.session.commit()
-        tasks[task_id]['log'].append("SUCCESS: Node added!"); tasks[task_id]['status']='Completed'
+        
+        tasks[task_id]['log'].append("-> [7/7] SUCCESS: Node added!"); tasks[task_id]['status']='Completed'
     except Exception as e:
         error_output = e.stderr if hasattr(e,'stderr') and e.stderr else str(e)
         tasks[task_id]['log'].append(f"ERROR: {error_output}"); tasks[task_id]['status']='Failed'
+
 def delete_node_task(task_id,node_id):
     def log(message,is_error=False): tasks[task_id]['log'].append(message); tasks[task_id]['status']='Failed' if is_error else 'In Progress'
     try:
@@ -660,7 +678,7 @@ EOL
         <h3 class="text-xl font-bold text-gray-900 text-center">Add a New Remote Node</h3>
         <p class="text-center text-sm text-slate-600 mt-1">Enter the details of the new server to add to the mesh.</p>
         <form id="addNodeForm" class="mt-6 space-y-4">
-            <input class="w-full px-4 py-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-slate-400 focus:outline-none transition" name="name" placeholder="Node Name (e.g., germany-node)" required>
+            <input class="w-full px-4 py-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-slate-400 focus:outline-none transition" name="name" placeholder="Node Name (e.g., germanynode)" required pattern="[a-zA-Z0-9]+" title="Please use English letters and numbers only (no spaces or symbols)." oninput="this.value = this.value.replace(/[^a-zA-Z0-9]/g, '')">
             <input class="w-full px-4 py-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-slate-400 focus:outline-none transition" name="public_ip" placeholder="Public IP Address" required>
             <input class="w-full px-4 py-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-slate-400 focus:outline-none transition" name="private_ip" placeholder="Tinc Private IP (e.g., 10.20.0.2)" required>
             <input class="w-full px-4 py-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-slate-400 focus:outline-none transition" name="ssh_user" placeholder="SSH Username (e.g., root)" required>
