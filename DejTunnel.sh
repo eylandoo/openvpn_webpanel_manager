@@ -303,34 +303,66 @@ echo "Subnet = {private_ip}/32" | sudo tee -a /etc/tinc/{net_name}/hosts/{node_n
         error_output = e.stderr if hasattr(e,'stderr') and e.stderr else str(e)
         tasks[task_id]['log'].append(f"ERROR: {error_output}"); tasks[task_id]['status']='Failed'
 
-def delete_node_task(task_id,node_id):
-    def log(message,is_error=False): tasks[task_id]['log'].append(message); tasks[task_id]['status']='Failed' if is_error else 'In Progress'
+def delete_node_task(task_id, node_id):
+    def log(message, is_error=False):
+        tasks[task_id]['log'].append(message)
+        tasks[task_id]['status'] = 'Failed' if is_error else 'In Progress'
     try:
         with app.app_context():
-            node_to_delete = RemoteNode.query.get(node_id); other_nodes = RemoteNode.query.filter(RemoteNode.id != node_id).all(); main_network = TincNetwork.query.first()
-        if not node_to_delete: log("ERROR: Node not found.", is_error=True); return
-        net_name, hosts_dir, clients_dir = main_network.net_name, f"/etc/tinc/{main_network.net_name}/hosts", "/etc/tinc/clients_info"
+            node_to_delete = RemoteNode.query.get(node_id)
+            other_nodes = RemoteNode.query.filter(RemoteNode.id != node_id).all()
+            main_network = TincNetwork.query.first()
+        if not node_to_delete:
+            log("ERROR: Node not found in database.", is_error=True)
+            return
+        net_name = main_network.net_name
+        hosts_dir = f"/etc/tinc/{net_name}/hosts"
+        clients_dir = "/etc/tinc/clients_info"
         ssh_opts = ["-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10"]
-        log(f"-> [1/5] Uninstalling Tinc from {node_to_delete.name}...")
+        log(f"-> [1/5] Attempting to connect and uninstall Tinc from {node_to_delete.name}...")
         cleanup_script = f"sudo {CMD_SYSTEMCTL} stop tinc@{net_name}; sudo {CMD_SYSTEMCTL} disable tinc@{net_name}; sudo {CMD_RM} -rf /etc/tinc/{net_name}"
-        subprocess.run([CMD_SSHPASS,"-p",node_to_delete.ssh_pass,CMD_SSH,*ssh_opts,f"{node_to_delete.ssh_user}@{node_to_delete.public_ip}",cleanup_script],check=True,timeout=60)
-        log(f"-> [2/5] Deleting local files...")
-        os.remove(f"{hosts_dir}/{node_to_delete.name}")
-        os.remove(f"{clients_dir}/{node_to_delete.name}")
+        remote_cleanup_result = subprocess.run([CMD_SSHPASS, "-p", node_to_delete.ssh_pass, CMD_SSH, *ssh_opts, f"{node_to_delete.ssh_user}@{node_to_delete.public_ip}", cleanup_script], capture_output=True, text=True, timeout=60)
+        if remote_cleanup_result.returncode == 0:
+            log(f"  - SUCCESS: Successfully cleaned up remote node {node_to_delete.name}.")
+        else:
+            log(f"  - WARNING: Could not connect to {node_to_delete.name}. It may be offline.")
+            log("  - Proceeding with force deletion (removing from this panel and other nodes).")
+        log(f"-> [2/5] Deleting local host and client files...")
+        try:
+            if os.path.exists(f"{hosts_dir}/{node_to_delete.name}"):
+                os.remove(f"{hosts_dir}/{node_to_delete.name}")
+            if os.path.exists(f"{clients_dir}/{node_to_delete.name}"):
+                os.remove(f"{clients_dir}/{node_to_delete.name}")
+            log("  - Local files removed.")
+        except Exception as e:
+            log(f"  - WARNING: Could not delete local files. They may not exist. Error: {e}")
         log(f"-> [3/5] Updating other mesh nodes...")
-        for node in other_nodes:
-            log(f"  - Removing host file from {node.name} and restarting...")
-            update_script = f"sudo {CMD_RM} -f {hosts_dir}/{node_to_delete.name} && sudo {CMD_SYSTEMCTL} restart tinc@{net_name}"
-            subprocess.run([CMD_SSHPASS,"-p",node.ssh_pass,CMD_SSH,*ssh_opts,f"{node.ssh_user}@{node.public_ip}",update_script],check=True,timeout=45)
+        if not other_nodes:
+            log("  - No other nodes to update.")
+        else:
+            for node in other_nodes:
+                log(f"  - Sending update to {node.name}...")
+                update_script = f"sudo {CMD_RM} -f {hosts_dir}/{node_to_delete.name} && sudo {CMD_SYSTEMCTL} restart tinc@{net_name}"
+                try:
+                    subprocess.run([CMD_SSHPASS, "-p", node.ssh_pass, CMD_SSH, *ssh_opts, f"{node.ssh_user}@{node.public_ip}", update_script], check=True, capture_output=True, text=True, timeout=45)
+                    log(f"    - Successfully updated {node.name}.")
+                except Exception as e:
+                    error_msg = e.stderr if hasattr(e, 'stderr') and e.stderr else str(e)
+                    log(f"    - WARNING: Could not update node {node.name}. It might be offline. Skipping. Error: {error_msg}")
         log(f"-> [4/5] Restarting main server's service...")
-        subprocess.run([CMD_SUDO,CMD_SYSTEMCTL,"restart",f"tinc@{net_name}"],check=True)
+        subprocess.run([CMD_SUDO, CMD_SYSTEMCTL, "restart", f"tinc@{net_name}"], check=True)
         log(f"-> [5/5] Removing from database...")
         with app.app_context():
-            db.session.delete(node_to_delete); db.session.commit()
-        tasks[task_id]['log'].append("SUCCESS: Node removed!"); tasks[task_id]['status']='Completed'
+            node_to_del_in_db = db.session.get(RemoteNode, node_id)
+            if node_to_del_in_db:
+                db.session.delete(node_to_del_in_db)
+                db.session.commit()
+        tasks[task_id]['log'].append("SUCCESS: Node removal process completed!")
+        tasks[task_id]['status'] = 'Completed'
     except Exception as e:
-        error_output = e.stderr if hasattr(e,'stderr') else str(e)
-        tasks[task_id]['log'].append(f"ERROR: {error_output}"); tasks[task_id]['status']='Failed'
+        error_output = e.stderr if hasattr(e, 'stderr') and e.stderr else str(e)
+        tasks[task_id]['log'].append(f"FATAL ERROR during deletion process: {error_output}")
+        tasks[task_id]['status'] = 'Failed'
 
 # --- Routes ---
 @app.route('/login',methods=['GET','POST'])
