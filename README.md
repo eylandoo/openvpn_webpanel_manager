@@ -4,6 +4,8 @@
 [![Flask](https://img.shields.io/badge/Flask-2.x-black?logo=flask)](https://flask.palletsprojects.com/)
 [![Tailwind CSS](https://img.shields.io/badge/UI-Tailwind_CSS-38B2AC?logo=tailwind-css)](https://tailwindcss.com/)
 [![License: All Rights Reserved](https://img.shields.io/badge/License-All_Rights_Reserved-blue)](LICENSE)
+
+
 OVPN Manager is a comprehensive, self-hosted web panel built with Flask to streamline the management of OpenVPN servers. It provides a modern, user-friendly, and feature-rich interface for managing users, resellers (sub-admins), and even multi-node deployments, turning complex server administration into a simple point-and-click experience.
 
 This panel is designed for administrators who need granular control over user access, traffic, and server resources, all from a centralized and intuitive dashboard.
