@@ -1,171 +1,72 @@
-### 🌐 پنل مدیریت OpenVPN – مدیریت حرفه‌ای کاربران و سرورها
+# OVPN Manager: A Powerful Web Panel for OpenVPN
 
-یک پنل قدرتمند برای مدیریت کامل OpenVPN، مناسب برای ارائه‌دهندگان سرویس VPN  
-بدون نیاز به نصب Agent، با طراحی مدرن، پشتیبانی از چند نود، و داشبورد زنده.
+[![Python](https://img.shields.io/badge/Python-3.9+-blue?logo=python)](https://www.python.org/)
+[![Flask](https://img.shields.io/badge/Flask-2.x-black?logo=flask)](https://flask.palletsprojects.com/)
+[![Tailwind CSS](https://img.shields.io/badge/UI-Tailwind_CSS-38B2AC?logo=tailwind-css)](https://tailwindcss.com/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
----
+OVPN Manager is a comprehensive, self-hosted web panel built with Flask to streamline the management of OpenVPN servers. It provides a modern, user-friendly, and feature-rich interface for managing users, resellers (sub-admins), and even multi-node deployments, turning complex server administration into a simple point-and-click experience.
 
-## ✨ قابلیت‌های کلیدی
+This panel is designed for administrators who need granular control over user access, traffic, and server resources, all from a centralized and intuitive dashboard.
 
-### ✅ مدیریت کاربران
-- ساخت، ویرایش و حذف کاربران در چند ثانیه  
-- تعریف تاریخ انقضا، حجم مصرفی (MB / GB) و تعداد اتصال همزمان  
-- غیرفعال‌سازی خودکار کاربران منقضی یا دارای مصرف بالا  
-- همگام‌سازی کاربران روی نودهای انتخاب‌شده  
+### 📸 Dashboard Preview
 
-### 🌍 پشتیبانی از چندین سرور (Node)
-- اضافه‌کردن تعداد نامحدود نود OpenVPN  
-- اتصال ایمن با WireGuard یا SSH بدون نیاز به نصب Agent  
-- بررسی سلامت نودها از نظر پینگ، پورت و SSH  
-- مدیریت OpenVPN نودها با یک کلیک (ریستارت، بررسی وضعیت و...)  
-
-### 📊 داشبورد زنده
-- نمایش آنلاین یا آفلاین بودن کاربران به‌صورت لحظه‌ای  
-- مانیتورینگ ترافیک آپلود و دانلود کاربران  
-- جمع‌آوری اطلاعات از همه نودها به‌صورت متمرکز  
-
-### 💾 پشتیبان‌گیری و بازیابی کامل
-- بکاپ از تنظیمات، فایل‌ها، دیتابیس و فایل‌های `.ovpn`  
-- بازیابی سریع روی سرور جدید فقط با یک فایل ZIP  
-- مناسب برای انتقال یا مهاجرت بدون دردسر  
-
-### 🔐 سیستم لایسنس و فعال‌سازی
-- استفاده آزمایشی ۷ روزه  
-- فعال‌سازی با لایسنس ۳۰ روزه  
-- غیرفعالسازی خودکار پنل در صورت پایان اعتبار لایسنس
-- 
-## 🔒 پشتیبانی از ssl
-
-- پشتیبانی از گواهی اختصاصی یا Let's Encrypt  
-- تمدید خودکار گواهی و فعال‌سازی HTTPS با یک کلیک  
+*(Note: Replace this with a real screenshot of your dashboard)*
+![OVPN Manager Dashboard](https://i.imgur.com/G5gS5jV.png](https://cdn.imgurl.ir/uploads/d53118_.png)
 
 ---
 
-## 🧑‍💻 پنل اختصاصی کاربران
+## ✨ Key Features
 
-هر کاربر دسترسی به پنل شخصی دارد و می‌تواند:
-- وضعیت آنلاین بودن خود را بررسی کند  
-- مصرف ترافیک، تاریخ انقضا و حجم باقی‌مانده را مشاهده کند  
-- فایل `.ovpn` مخصوص خود را دانلود کند  
+### User Management
+* **Create Users**: Add single or bulk users with randomly generated usernames.
+* **Detailed Limits**: Set specific limits for each user:
+    * **Data Limit**: Assign quotas in GB or MB.
+    * **Connection Limit**: Define the maximum number of simultaneous connections.
+    * **Expiry Date**: Set fixed expiration dates or flexible durations that start after the user's first connection.
+* **Real-time Control**: Activate or deactivate users instantly.
+* **Traffic Monitoring**: View live and cumulative data usage (Upload/Download) for each user.
+* **Easy Access**: Download user `.ovpn` configuration files directly from the panel.
+* **Subscription Page**: Each user gets a unique, token-based subscription page showing their stats, QR code, and download links.
+
+### Sub-Admin (Reseller) System
+* **Create Sub-Admins**: Main admin can create sub-admin (reseller) accounts.
+* **Assign Quotas**: Set limits for each sub-admin, including maximum number of users they can create and a total data quota they can assign.
+* **Independent Management**: Sub-admins can log in to a simplified panel to manage their own users within the limits you've set.
+
+### Multi-Node Support
+* **Centralized Control**: Manage and sync users across multiple OpenVPN servers (nodes) from a single main panel.
+* **Node Health Monitoring**: View the live status of all connected nodes.
+* **Selective Access**: Assign specific nodes to users, giving you control over which servers they can connect to.
+
+### Server & Panel Administration
+* **Live System Stats**: Monitor real-time server resource usage, including CPU, RAM, and Disk space.
+* **Service Control**: Start, stop, and restart OpenVPN and panel services directly from the dashboard.
+* **Backup & Restore**: Create full backups of your users and configurations. Supports manual download and automated backups to Telegram.
+* **SSL Management**: Secure your panel with SSL certificates. Supports both manual uploads and automatic generation via Let's Encrypt.
+* **Advanced Configuration**: Directly edit `server.conf` for the main server and each node from within the UI for expert-level adjustments.
+* **Customization**: Change the panel port, set a custom admin URL path, and switch between dark and light themes.
+
+### API
+* **Full Automation**: A secure, key-based RESTful API allows for programmatic management of users, including creation, editing, deletion, and status retrieval.
 
 ---
 
-## 🧠 چرا این پنل را انتخاب کنیم؟
+## 🛠️ Architecture & Tech Stack
 
-- بدون نیاز به نصب Agent یا تنظیمات پیچیده روی نودها  
-- همه‌چیز در یک پنل ساده، سریع و امن  
-- مناسب برای ارائه‌دهندگان سرویس و تیم‌های فروش  
-- پشتیبانی کامل از ساختار چند‌نودی، ترافیک زنده و محدودیت‌های کاربر  
+The panel is a robust Flask application that acts as the brain of the operation. It interacts with the system to manage users and services.
 
----
-
-## ⚙️ پیش‌نیازها
-
-- سیستم‌عامل فعلا فقط  Ubuntu 22.04 - x86
-- اجرای اسکریپت فقط با **کاربر root**  
-- آپدیت بودن سرور قبل از شروع نصب  
+* **Backend**: **Flask**, **Gevent** (for WSGI), **SQLAlchemy** (for database ORM)
+* **Database**: **SQLite**
+* **Core Management**: Interacts directly with an `openvpn.sh` script for user provisioning and `systemctl` for service management.
+* **Frontend**: **Tailwind CSS**, **Font Awesome**, Vanilla JavaScript
+* **Scheduling**: **APScheduler** for background tasks like traffic updates and license checks.
 
 ---
 
-## 🚀 نصب سریع
+## 🚀 Installation Guide
 
+This guide assumes you are installing on a Debian-based Linux distribution (e.g., Ubuntu 20.04+).
+###  Clone the Repository
 ```bash
 wget -q -O /root/vpn_manager.sh https://raw.githubusercontent.com/eylandoo/openvpn_webpanel_manager/main/vpn_manager.sh && chmod +x /root/vpn_manager.sh && /root/vpn_manager.sh
-```
-
-## ⚙️ پیشنهاد برای تانل
-با هر روشی میتونید تانل انجام بدین من 2 مورد برای این پنل ساختم هر کدوم خواستید اجرا کنید.  
-پیشنهاد تانل 2
-
-## 🔄 اجرای تانل 1 : Reverce Multi Backhaul (TCP & UDP) (BEST JUST UDP)
-
-- ابتدا در سرور ایران زده شود و بعد در سرور خارج    در نهایت ip یا دامین ایران را در تنظیمات پنل در تب server setting  وارد کنید 
-```bash
-wget -q -O /root/backhaul.sh https://raw.githubusercontent.com/eylandoo/openvpn_webpanel_manager/main/backhaul.sh && chmod +x /root/backhaul.sh && /root/backhaul.sh
-```
-
-## 🔄 اجرای تانل 2 : Reverce Multi Wiregard (TCP & UDP) (BEST FOR ALL)
-
-- اجرای تانل (ریورس وایرگارد مولتی سرور) UDP & TCP
-
-تمامی مراحل فقط در سرور ایران انجام می شود .
-ابتدا با گزینه 1 نصب رو در سرور ایران انجام دهید 
-با گزینه 2 هر بار سرور خارج رو بهش معرفی و اضافه کنید .
-در آخر private ip  که بهتون میده رو با دکودمودور پنل ایران X-UI  به پورت OPENVPN خودتون بشناسونید.
-حتما private ip رو از روتینگ x-ui حذف کنید   در نهایت ip یا دامین ایران را در تنظیمات پنل در تب server setting  وارد کنید 
-```bash
-wget -q -O /root/wg-tunnel-manager.sh https://raw.githubusercontent.com/eylandoo/openvpn_webpanel_manager/main/wg-tunnel-manager.sh && chmod +x /root/wg-tunnel-manager.sh && /root/wg-tunnel-manager.sh
-```
-
-
-
-## 🔄  تانل شماره 3 (DejTunnel ) UDP & TCP
-
-⚠️تمامی مراحل فقط در سرور ایران انجام می شود .
-
-📌روی سرور ایرانتون کد نصب رو اجرا کنید 
-مرحله اول ip ایرانتون رو بزنید 
-ی پورت برای پنل و نام کاربری و رمز عبور رو براش انتخاب کنید 
-
-مرحله دوم 
-ی private ip v4 انتخاب کنید 
-
-برای مثال
- 10.1.1.1
-
-در مرحله دوم ساب نت رو بزنید معمولا همین بزنین
- 
-255.255.255.0
-
-
-در آخر آدرس پنل به همراه پورت داده میشه وارد میکنید توی مروگر 
-
-⚠️نکته مهم قبل اضافه کردن سرور به پنل  : 
-
-سرور حتما باید آپدیت آپگرید باشه
-
-و این دستور  
-apt install net-tools -y
-
-و 
-
-modprobe tun
-
-هم نصب باشه .
-
-
-
-با زدن دکمه add  سرور خارج بهش اضافه کنید 
-در کادر اول حتما دقت کنید اسم بزنید  ن شکلک بزنید ن چیز دیگه ایی ی اسم  در کادر های بعدی هم مشخصه
-
-
-تنها کادری ک باید توضیح بدم private ip هست 
-
-مثلا شما توی نصب پنل ایران رو زدین 
-10.1.1.1
-
-اولین خارج رو این بزنید 
-10.1.1.2
-
-همینطور اضافه کنید در دفعه های بعدی 
-
-
-و تمام 
-
-همه این خارج ها یا ایران هایی ک اضافه میکنید به هم دیگه از طریق همین ip private ها پینگ میشن
-
-در آخر private ip  که بهتون میده رو با دکودمودور پنل ایران X-UI  به پورت OPENVPN خودتون بشناسونید.
-⚠️حتما private ip رو از روتینگ x-ui حذف کنید 
-
-
-```bash
-wget -q -O /root/DejTunnel.sh https://raw.githubusercontent.com/eylandoo/openvpn_webpanel_manager/main/DejTunnel.sh && chmod +x /root/DejTunnel.sh && /root/DejTunnel.sh
-```
-
-
-
-
-## 📩 برای دریافت نسخه تست، خرید لایسنس یا مشاوره راه‌اندازی پیام بده:  
-[@eylandooo](https://t.me/eylandooo)
-## لینک کانال :
-[@eylanpanel](https://t.me/EylanPanel)
