@@ -10,7 +10,6 @@ This panel is designed for administrators who need granular control over user ac
 
 ### 📸 Dashboard Preview
 
-*(Note: Replace this with a real screenshot of your dashboard)*
 ![OVPN Manager Dashboard](https://uploadkon.ir/uploads/803c11_25eylanpanel.png)
 ---
 
