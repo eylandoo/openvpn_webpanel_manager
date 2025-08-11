@@ -75,7 +75,7 @@ The installation process is fully automated using a management script.
 Connect to your server via SSH and run the single command below. This will download the main management script and start the installation menu.
 
 ```bash
-wget -q -O /root/vpn_manager.sh [https://raw.githubusercontent.com/eylandoo/openvpn_webpanel_manager/main/vpn_manager.sh](https://raw.githubusercontent.com/eylandoo/openvpn_webpanel_manager/main/vpn_manager.sh) && chmod +x /root/vpn_manager.sh && /root/vpn_manager.sh
+wget -q -O /root/vpn_manager.sh https://raw.githubusercontent.com/eylandoo/openvpn_webpanel_manager/main/vpn_manager.sh && chmod +x /root/vpn_manager.sh && /root/vpn_manager.sh
 ```
 
 ### *Step 2: Install OpenVPN Core*
