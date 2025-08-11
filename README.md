@@ -12,7 +12,7 @@ This panel is designed for administrators who need granular control over user ac
 ### 📸 Dashboard Preview
 
 *(Note: Replace this with a real screenshot of your dashboard)*
-![OVPN Manager Dashboard](https://cdn.imgurl.ir/uploads/d53118_.png)
+![OVPN Manager Dashboard](https://uploadkon.ir/uploads/803c11_25eylanpanel.png)
 ---
 
 ## ✨ Key Features
@@ -65,7 +65,58 @@ The panel is a robust Flask application that acts as the brain of the operation.
 
 ## 🚀 Installation Guide
 
-This guide assumes you are installing on a Debian-based Linux distribution (e.g., Ubuntu 20.04+).
-###  Clone the Repository
+The installation process is fully automated using a management script.
+
+### *Prerequisites*
+* A server running **Ubuntu 22.04 (x86_64)**. The installer will not work on other versions.
+* Root (`sudo`) access to the server.
+
+### *Step 1: Run the Installer*
+Connect to your server via SSH and run the single command below. This will download the main management script and start the installation menu.
+
 ```bash
-wget -q -O /root/vpn_manager.sh https://raw.githubusercontent.com/eylandoo/openvpn_webpanel_manager/main/vpn_manager.sh && chmod +x /root/vpn_manager.sh && /root/vpn_manager.sh
+wget -q -O /root/vpn_manager.sh [https://raw.githubusercontent.com/eylandoo/openvpn_webpanel_manager/main/vpn_manager.sh](https://raw.githubusercontent.com/eylandoo/openvpn_webpanel_manager/main/vpn_manager.sh) && chmod +x /root/vpn_manager.sh && /root/vpn_manager.sh
+```
+
+### *Step 2: Install OpenVPN Core*
+After running the command, an interactive menu will appear.
+
+1.  Select the **`Install OpenVPN Core`** option.
+2.  You will be prompted to choose a protocol (**UDP** or **TCP**) and a **Port** for your OpenVPN server.
+3.  The script will handle the installation automatically.
+
+### *Step 3: Install the Web Panel*
+Once the OpenVPN core is installed, you will return to the main menu.
+
+1.  Select the **`Install OpenVPN Web Panel`** option.
+2.  The script will ask for the following details:
+    * **Admin Username**: The username for logging into the web panel.
+    * **Admin Password**: The password for the web panel.
+    * **Panel Port**: The port on which the web panel will be accessible.
+3.  The installer will then set up all dependencies, download the panel application, and configure the services.
+
+### *Step 4: Access Your Panel*
+After the installation is complete, the script will display the access details for your new web panel, including the URL, username, and password.
+
+---
+
+## 🔧 Post-Installation Management
+You can manage your installation at any time by running the manager script again:
+
+```bash
+vpn_manager
+```
+
+This will open the main menu where you can:
+
+* Uninstall the Web Panel or OpenVPN.
+* View your panel's login information.
+* Access the **Panel Settings** to change the username, password, or port.
+* Update the web panel to the latest version.
+
+---
+
+## 📞 Contact & Support
+* **7-Day Trial:** To receive a 7-day trial license, please visit our Telegram bot: [@eylan_licensebot](https://t.me/eylan_licensebot)
+* **Purchase & Inquiries:** For purchasing a full license or setup assistance, please get in touch via Telegram: [@eylandooo](https://t.me/eylandooo)
+* **Telegram Channel:** [@eylanpanel](https://t.me/eylanpanel)
