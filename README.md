@@ -12,8 +12,7 @@ This panel is designed for administrators who need granular control over user ac
 ### 📸 Dashboard Preview
 
 *(Note: Replace this with a real screenshot of your dashboard)*
-![OVPN Manager Dashboard](https://i.imgur.com/G5gS5jV.png](https://cdn.imgurl.ir/uploads/d53118_.png)
-
+![OVPN Manager Dashboard]([https://i.imgur.com/G5gS5jV.png](https://i.imgur.com/G5gS5jV.png](https://cdn.imgurl.ir/uploads/d53118_.png))
 ---
 
 ## ✨ Key Features
