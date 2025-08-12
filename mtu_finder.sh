@@ -1,5 +1,12 @@
 #!/bin/bash
 
+# ==============================================================================
+# Script Name: Smart MTU & MSS Finder
+# Description: Automatically finds the optimal MTU and MSS values for your server.
+# Author:      eylan
+# Version:     1.2
+# ==============================================================================
+
 # --- Configuration ---
 # You can change this to a reliable host. 8.8.8.8 or your provider's gateway are good options.
 TARGET_HOST="google.com"
