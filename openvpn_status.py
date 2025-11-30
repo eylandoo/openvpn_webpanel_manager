@@ -8,12 +8,13 @@ import glob
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import subprocess
+import fcntl
 
 PORT = 7506
 OPENVPN_CONF_DIR = '/etc/openvpn/server/'
 CCD_DIR = '/etc/openvpn/server/ccd/'
 OVPN_FILES_DIR = '/root/ovpnfiles/'
-OPENVPN_SCRIPT_PATH = "/root/openvpn.sh"
+L2TP_ACTIVE_FILE = "/dev/shm/active_l2tp_users"
 
 class StatusHandler(BaseHTTPRequestHandler):
     def _log(self, message):
@@ -39,8 +40,8 @@ class StatusHandler(BaseHTTPRequestHandler):
 
     def get_status_from_management_port(self, host, port):
         try:
-            with socket.create_connection((host, port), timeout=1) as sock:
-                sock.settimeout(1)
+            with socket.create_connection((host, port), timeout=2) as sock:
+                sock.settimeout(2)
                 sock.recv(4096)
                 sock.sendall(b"status 2\n")
                 data = b""
@@ -75,7 +76,6 @@ class StatusHandler(BaseHTTPRequestHandler):
                         if line.strip().startswith('port '): p = line.strip().split()[1]
                         if line.strip().startswith('proto '): proto = line.strip().split()[1]
                     if p and proto: port_map[7505] = {'public_port': p, 'protocol': proto}
-
         except Exception as e:
             self._log(f"Error creating port map: {e}")
 
@@ -86,201 +86,223 @@ class StatusHandler(BaseHTTPRequestHandler):
                 port = future_to_port[future]
                 try:
                     data = future.result()
-                    if data:
-                        status_outputs[port] = data
+                    if data: status_outputs[port] = data
                 except Exception as e:
-                    self._log(f"Error fetching status from a thread for port {port}: {e}")
+                    self._log(f"Error fetching status from port {port}: {e}")
         return status_outputs, port_map
+
+    def _get_l2tp_stats(self):
+        l2tp_data = {}
+        try:
+            if not os.path.exists(L2TP_ACTIVE_FILE):
+                return {}
+            interface_map = {}
+            active_interfaces = set()
+            if os.path.exists("/proc/net/dev"):
+                with open("/proc/net/dev", "r") as f:
+                    for line in f:
+                        if ":" in line:
+                            active_interfaces.add(line.split(":")[0].strip())
+            seen_sessions = set()
+            with open(L2TP_ACTIVE_FILE, 'r') as f:
+                try:
+                    fcntl.flock(f, fcntl.LOCK_SH)
+                    for line in f:
+                        parts = line.strip().split(':')
+                        if len(parts) == 2:
+                            uname = parts[0]
+                            iface = parts[1].strip()
+                            if iface in active_interfaces and iface not in seen_sessions:
+                                interface_map[iface] = uname
+                                seen_sessions.add(iface)
+                finally:
+                    fcntl.flock(f, fcntl.LOCK_UN)
+            if not interface_map:
+                return {}
+            with open("/proc/net/dev", "r") as f:
+                lines = f.readlines()
+            for line in lines:
+                if ":" not in line: continue
+                parts = line.split(":")
+                iface_name = parts[0].strip()
+                if iface_name in interface_map:
+                    stats = parts[1].split()
+                    rx = int(stats[0])
+                    tx = int(stats[8])
+                    username = interface_map[iface_name]
+                    if username not in l2tp_data:
+                        l2tp_data[username] = {'active': 0, 'bytes_received': 0, 'bytes_sent': 0}
+                    l2tp_data[username]['active'] += 1
+                    l2tp_data[username]['bytes_received'] += rx 
+                    l2tp_data[username]['bytes_sent'] += tx 
+        except Exception as e:
+            self._log(f"Error getting L2TP stats: {e}")
+        return l2tp_data
+
+    def _get_cisco_stats(self):
+        cisco_data = {}
+        try:
+            result = subprocess.run(['occtl', '-j', 'show', 'users'], capture_output=True, text=True)
+            if result.returncode == 0:
+                users_list = json.loads(result.stdout)
+                for user in users_list:
+                    username = user.get('Username')
+                    if not username: continue
+                    
+                    if username not in cisco_data:
+                        cisco_data[username] = {'active': 0, 'bytes_received': 0, 'bytes_sent': 0}
+                    
+                    cisco_data[username]['active'] += 1
+                    try:
+                        rx = int(user.get('RX', 0))
+                        tx = int(user.get('TX', 0))
+                        cisco_data[username]['bytes_received'] += rx
+                        cisco_data[username]['bytes_sent'] += tx
+                    except: pass
+        except Exception as e:
+            self._log(f"Error getting Cisco stats: {e}")
+        return cisco_data
 
     def do_GET(self):
         try:
-            management_ports = self._get_all_management_ports()
-            status_outputs, port_map = self.get_all_openvpn_statuses(management_ports)
+            mgmt_ports = self._get_all_management_ports()
+            status_outputs, port_map = self.get_all_openvpn_statuses(mgmt_ports)
             
             detailed_users = {}
             for mgmt_port, status_data in status_outputs.items():
                 port_info = port_map.get(mgmt_port)
                 if not port_info: continue
-                
-                public_port_key = f"{port_info['public_port']}/{port_info['protocol']}"
+                key = f"{port_info['public_port']}/{port_info['protocol']}"
                 for line in status_data.split("\n"):
                     if line.startswith("CLIENT_LIST"):
                         parts = line.split(",")
                         if len(parts) >= 7:
-                            username = parts[1].strip()
-                            if username:
-                                detailed_users.setdefault(username, {})
-                                detailed_users[username].setdefault(public_port_key, { "active": 0, "bytes_received": 0, "bytes_sent": 0 })
-                                detailed_users[username][public_port_key]["active"] += 1
+                            uname = parts[1].strip()
+                            if uname:
+                                detailed_users.setdefault(uname, {})
+                                detailed_users[uname].setdefault(key, { "active": 0, "bytes_received": 0, "bytes_sent": 0 })
+                                detailed_users[uname][key]["active"] += 1
                                 try:
-                                    detailed_users[username][public_port_key]["bytes_received"] += int(parts[5])
-                                    detailed_users[username][public_port_key]["bytes_sent"] += int(parts[6])
-                                except (ValueError, IndexError):
-                                    pass
+                                    detailed_users[uname][key]["bytes_received"] += int(parts[5])
+                                    detailed_users[uname][key]["bytes_sent"] += int(parts[6])
+                                except: pass
             
-            aggregated_users = {}
-            for username, port_data in detailed_users.items():
-                aggregated_users[username] = { "active": 0, "bytes_received": 0, "bytes_sent": 0 }
-                for port, stats in port_data.items():
-                    aggregated_users[username]["active"] += stats["active"]
-                    aggregated_users[username]["bytes_received"] += stats["bytes_received"]
-                    aggregated_users[username]["bytes_sent"] += stats["bytes_sent"]
+            l2tp_stats = self._get_l2tp_stats()
+            for uname, stats in l2tp_stats.items():
+                detailed_users.setdefault(uname, {})
+                key = "L2TP/IPsec"
+                detailed_users[uname].setdefault(key, { "active": 0, "bytes_received": 0, "bytes_sent": 0 })
+                detailed_users[uname][key]["active"] += stats['active']
+                detailed_users[uname][key]["bytes_received"] += stats['bytes_received']
+                detailed_users[uname][key]["bytes_sent"] += stats['bytes_sent']
 
-            final_response = { "aggregated": aggregated_users, "detailed": detailed_users }
-            
+            cisco_stats = self._get_cisco_stats()
+            for uname, stats in cisco_stats.items():
+                detailed_users.setdefault(uname, {})
+                key = "Cisco AnyConnect"
+                detailed_users[uname].setdefault(key, { "active": 0, "bytes_received": 0, "bytes_sent": 0 })
+                detailed_users[uname][key]["active"] += stats['active']
+                detailed_users[uname][key]["bytes_received"] += stats['bytes_received']
+                detailed_users[uname][key]["bytes_sent"] += stats['bytes_sent']
+
+            aggregated = {}
+            for u, p_data in detailed_users.items():
+                aggregated[u] = { "active": 0, "bytes_received": 0, "bytes_sent": 0 }
+                for p, s in p_data.items():
+                    aggregated[u]["active"] += s["active"]
+                    aggregated[u]["bytes_received"] += s["bytes_received"]
+                    aggregated[u]["bytes_sent"] += s["bytes_sent"]
+
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
             self.end_headers()
-            self.wfile.write(json.dumps(final_response).encode('utf-8'))
+            self.wfile.write(json.dumps({ "aggregated": aggregated, "detailed": detailed_users }).encode('utf-8'))
         except Exception as e:
             self._log(f"Error in do_GET: {str(e)}")
             self.send_response(500)
-            self.end_headers()
-            self.wfile.write(json.dumps({"error": "Internal server error"}).encode('utf-8'))
 
     def do_POST(self):
         try:
             content_length = int(self.headers['Content-Length'])
             post_data = self.rfile.read(content_length)
             data = json.loads(post_data)
-
-            commands = data.get('commands')
-            if not commands or not isinstance(commands, list):
-                return self.send_error(400, "Request body must contain a 'commands' list.")
-
+            commands = data.get('commands', [])
             results = []
             
-            users_for_batch_delete = [
-                item['username'] for item in commands 
-                if item.get('command') == 'delete_user_completely' and item.get('username')
-            ]
-            if users_for_batch_delete:
-                success, message = self._handle_batch_delete(users_for_batch_delete)
-                results.append({"command": "batch_delete", "success": success, "message": message})
-
             for item in commands:
-                command = item.get('command')
-                username = item.get('username')
+                cmd = item.get('command')
+                uname = item.get('username')
+                success, msg = False, "Unknown"
                 
-                if command == 'delete_user_completely':
-                    continue
+                if cmd == 'kill':
+                    # OpenVPN Kill
+                    mgmt_ports = self._get_all_management_ports()
+                    for port in mgmt_ports:
+                        try:
+                            with socket.create_connection(('127.0.0.1', port), timeout=0.5) as s:
+                                s.recv(4096); s.sendall(f"kill {uname}\n".encode()); s.recv(4096)
+                        except: pass
+                    
+                    # L2TP Kill
+                    try:
+                        if os.path.exists(L2TP_ACTIVE_FILE):
+                            with open(L2TP_ACTIVE_FILE, 'r') as f:
+                                lines = f.readlines()
+                            for line in lines:
+                                parts = line.strip().split(':')
+                                if len(parts) == 2 and parts[0] == uname:
+                                    pid_file = f"/var/run/{parts[1]}.pid"
+                                    if os.path.exists(pid_file):
+                                        with open(pid_file) as pf:
+                                            pid = pf.read().strip()
+                                            if pid.isdigit(): subprocess.run(["kill", "-9", pid])
+                    except: pass
 
-                if not command or not username or '/' in username or '..' in username or not username.isascii():
-                    results.append({"username": username, "success": False, "error": "Invalid command or username"})
-                    continue
+                    # Cisco Kill
+                    try:
+                        subprocess.run(['occtl', 'disconnect', 'user', uname], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    except: pass
+                    
+                    success, msg = True, "Kill commands sent"
+
+                elif cmd == 'enable_user':
+                    Path(CCD_DIR).mkdir(parents=True, exist_ok=True)
+                    (Path(CCD_DIR)/uname).touch()
+                    success, msg = True, "CCD created"
+                elif cmd == 'disable_user':
+                    (Path(CCD_DIR)/uname).unlink(missing_ok=True)
+                    (Path(OVPN_FILES_DIR)/f"{uname}.ovpn").unlink(missing_ok=True)
+                    success, msg = True, "Files removed"
+                elif cmd == 'upload_ovpn':
+                    content = item.get('ovpn_content')
+                    if content:
+                        p = Path(OVPN_FILES_DIR)/f"{uname}.ovpn"
+                        p.parent.mkdir(parents=True, exist_ok=True)
+                        p.write_text(content, encoding='utf-8')
+                        success, msg = True, "Uploaded"
+                elif cmd == 'delete_user_completely':
+                    (Path(CCD_DIR)/uname).unlink(missing_ok=True)
+                    (Path(OVPN_FILES_DIR)/f"{uname}.ovpn").unlink(missing_ok=True)
+                    try:
+                        subprocess.run(['occtl', 'disconnect', 'user', uname], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    except: pass
+                    success, msg = True, "User deleted from node"
                 
-                success, message = False, "Unknown command"
-                if command == 'kill':
-                    success, message = self._handle_kill_command(username)
-                elif command == 'enable_user':
-                    success, message = self._handle_user_files_command(username, 'create_ccd')
-                elif command == 'disable_user':
-                    success, message = self._handle_user_files_command(username, 'delete_files')
-                elif command == 'upload_ovpn':
-                    success, message = self._handle_user_files_command(username, 'upload_ovpn', content=item.get('ovpn_content'))
-                
-                results.append({"username": username, "success": success, "message": message})
+                results.append({"username": uname, "success": success, "message": msg})
 
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps({"results": results}).encode('utf-8'))
-
         except Exception as e:
-            self._log(f"Error in do_POST (batch): {str(e)}")
-            self.send_error(500, f"Internal server error: {e}")
-
-    def _handle_kill_command(self, username):
-        management_ports = self._get_all_management_ports()
-        kill_count = 0
-        for port in management_ports:
-            try:
-                with socket.create_connection(('127.0.0.1', port), timeout=0.5) as sock:
-                    sock.recv(4096)
-                    sock.sendall(f"kill {username}\n".encode())
-                    sock.recv(4096)
-                    kill_count += 1
-            except Exception:
-                continue
-        return True, f"Kill command sent. {kill_count} sessions terminated."
-
-    def _handle_user_files_command(self, username, action, content=None):
-        ccd_path = Path(CCD_DIR) / username
-        ovpn_path = Path(OVPN_FILES_DIR) / f"{username}.ovpn"
-        try:
-            if action == 'create_ccd':
-                ccd_path.parent.mkdir(parents=True, exist_ok=True); ccd_path.touch()
-                return True, "CCD file created."
-            elif action == 'delete_files':
-                ccd_path.unlink(missing_ok=True); ovpn_path.unlink(missing_ok=True)
-                return True, "CCD and OVPN files removed."
-            elif action == 'upload_ovpn':
-                if content is None: return False, "Missing ovpn_content"
-                ovpn_path.parent.mkdir(parents=True, exist_ok=True)
-                ovpn_path.write_text(content, encoding='utf-8')
-                return True, "OVPN file uploaded."
-        except Exception as e:
-            return False, str(e)
-            
-    def _handle_batch_delete(self, usernames):
-        self._log(f"Received FINAL BATCH DELETE command for {len(usernames)} users on this node.")
-        try:
-            if usernames:
-                index_path = "/etc/openvpn/server/easy-rsa/pki/index.txt"
-                revoked_count = 0
-                if os.path.exists(index_path):
-                    with open(index_path, "r+") as f:
-                        fcntl.flock(f, fcntl.LOCK_EX)
-                        lines = f.readlines()
-                        new_lines = []
-                        usernames_set = set(usernames)
-                        
-                        for line in lines:
-                            parts = line.strip().split("\t")
-                            if len(parts) > 5 and parts[0] == "V":
-                                cn_part = next((p for p in parts[5].split("/") if p.startswith("CN=")), None)
-                                if cn_part and cn_part.split("=")[1] in usernames_set:
-                                    parts[0] = "R"
-                                    parts[2] = time.strftime("%y%m%d%H%M%SZ", time.gmtime())
-                                    new_lines.append("\t".join(parts) + "\n")
-                                    revoked_count += 1
-                                    continue
-                            new_lines.append(line)
-
-                        f.seek(0)
-                        f.writelines(new_lines)
-                        f.truncate()
-                        fcntl.flock(f, fcntl.LOCK_UN)
-                    
-                    crl_command = "cd /etc/openvpn/server/easy-rsa/ && ./easyrsa gen-crl"
-                    subprocess.run(crl_command, shell=True, check=True, capture_output=True, text=True, executable='/bin/bash')
-                    self._log(f"Marked {revoked_count} users as 'Revoked' and regenerated CRL on node.")
-
-            for username in usernames:
-                self._handle_kill_command(username)
-
-            files_to_delete = []
-            for username in usernames:
-                files_to_delete.append(str(Path(CCD_DIR) / username))
-                files_to_delete.append(str(Path(OVPN_FILES_DIR) / f"{username}.ovpn"))
-            
-            if files_to_delete:
-                rm_proc = subprocess.Popen(['xargs', '-0', 'rm', '-f'], stdin=subprocess.PIPE, text=True)
-                rm_proc.communicate('\0'.join(files_to_delete))
-                self._log(f"Batch-deleted {len(files_to_delete)} files on node.")
-
-            return True, f"{len(usernames)} users processed for batch deletion on this node."
-        except Exception as e:
-            self._log(f"Error during ultimate batch delete on node: {str(e)}")
-            return False, f"Batch delete failed on node: {str(e)}"
+            self.send_error(500, str(e))
 
 def run_server():
     try:
         server = HTTPServer(('0.0.0.0', PORT), StatusHandler)
-        print(f"Smart OpenVPN Status & Command Server (v6.0 - Ultimate Batch) running on http://0.0.0.0:{PORT}", flush=True)
         server.serve_forever()
     except OSError as e:
-        print(f"FATAL: Could not bind to port {PORT}. Error: {e}", flush=True)
+        print(f"Error: {e}")
 
 if __name__ == "__main__":
     run_server()
