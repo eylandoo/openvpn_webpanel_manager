@@ -15,6 +15,7 @@ OPENVPN_CONF_DIR = '/etc/openvpn/server/'
 CCD_DIR = '/etc/openvpn/server/ccd/'
 OVPN_FILES_DIR = '/root/ovpnfiles/'
 L2TP_ACTIVE_FILE = "/dev/shm/active_l2tp_users"
+OCCTL_BIN = "/usr/bin/occtl"
 
 class StatusHandler(BaseHTTPRequestHandler):
     def _log(self, message):
@@ -30,8 +31,10 @@ class StatusHandler(BaseHTTPRequestHandler):
                         stripped = line.strip()
                         if stripped.startswith('management '):
                             try:
-                                mgmt_port = int(stripped.split()[2])
-                                management_ports.add(mgmt_port)
+                                parts = stripped.split()
+                                if len(parts) >= 3:
+                                    mgmt_port = int(parts[2])
+                                    management_ports.add(mgmt_port)
                             except (ValueError, IndexError):
                                 continue
         except Exception as e:
@@ -64,7 +67,10 @@ class StatusHandler(BaseHTTPRequestHandler):
                         stripped = line.strip()
                         if stripped.startswith('port '): public_port = stripped.split()[1]
                         elif stripped.startswith('proto '): protocol = stripped.split()[1]
-                        elif stripped.startswith('management '): mgmt_port = int(stripped.split()[2])
+                        elif stripped.startswith('management '):
+                            parts = stripped.split()
+                            if len(parts) >= 3:
+                                mgmt_port = int(parts[2])
                 if mgmt_port:
                      port_map[mgmt_port] = {'public_port': public_port or 'N/A', 'protocol': protocol or 'N/A'}
 
@@ -142,23 +148,24 @@ class StatusHandler(BaseHTTPRequestHandler):
     def _get_cisco_stats(self):
         cisco_data = {}
         try:
-            result = subprocess.run(['occtl', '-j', 'show', 'users'], capture_output=True, text=True)
-            if result.returncode == 0:
-                users_list = json.loads(result.stdout)
-                for user in users_list:
-                    username = user.get('Username')
-                    if not username: continue
-                    
-                    if username not in cisco_data:
-                        cisco_data[username] = {'active': 0, 'bytes_received': 0, 'bytes_sent': 0}
-                    
-                    cisco_data[username]['active'] += 1
-                    try:
-                        rx = int(user.get('RX', 0))
-                        tx = int(user.get('TX', 0))
-                        cisco_data[username]['bytes_received'] += rx
-                        cisco_data[username]['bytes_sent'] += tx
-                    except: pass
+            if os.path.exists(OCCTL_BIN):
+                result = subprocess.run([OCCTL_BIN, '-j', 'show', 'users'], capture_output=True, text=True)
+                if result.returncode == 0:
+                    users_list = json.loads(result.stdout)
+                    for user in users_list:
+                        username = user.get('Username')
+                        if not username: continue
+                        
+                        if username not in cisco_data:
+                            cisco_data[username] = {'active': 0, 'bytes_received': 0, 'bytes_sent': 0}
+                        
+                        cisco_data[username]['active'] += 1
+                        try:
+                            rx = int(user.get('RX', 0))
+                            tx = int(user.get('TX', 0))
+                            cisco_data[username]['bytes_received'] += rx
+                            cisco_data[username]['bytes_sent'] += tx
+                        except: pass
         except Exception as e:
             self._log(f"Error getting Cisco stats: {e}")
         return cisco_data
@@ -235,15 +242,16 @@ class StatusHandler(BaseHTTPRequestHandler):
                 success, msg = False, "Unknown"
                 
                 if cmd == 'kill':
-                    # OpenVPN Kill
-                    mgmt_ports = self._get_all_management_ports()
-                    for port in mgmt_ports:
-                        try:
-                            with socket.create_connection(('127.0.0.1', port), timeout=0.5) as s:
-                                s.recv(4096); s.sendall(f"kill {uname}\n".encode()); s.recv(4096)
-                        except: pass
-                    
-                    # L2TP Kill
+                    try:
+                        mgmt_ports = self._get_all_management_ports()
+                        for port in mgmt_ports:
+                            try:
+                                with socket.create_connection(('127.0.0.1', port), timeout=1) as s:
+                                    s.recv(1024); s.sendall(f"kill {uname}\n".encode()); s.recv(1024)
+                            except: pass
+                    except Exception as e:
+                        self._log(f"OpenVPN kill error: {e}")
+
                     try:
                         if os.path.exists(L2TP_ACTIVE_FILE):
                             with open(L2TP_ACTIVE_FILE, 'r') as f:
@@ -255,15 +263,18 @@ class StatusHandler(BaseHTTPRequestHandler):
                                     if os.path.exists(pid_file):
                                         with open(pid_file) as pf:
                                             pid = pf.read().strip()
-                                            if pid.isdigit(): subprocess.run(["kill", "-9", pid])
-                    except: pass
+                                            if pid.isdigit(): 
+                                                subprocess.run(["kill", "-9", pid], check=False)
+                    except Exception as e:
+                        self._log(f"L2TP kill error: {e}")
 
-                    # Cisco Kill
                     try:
-                        subprocess.run(['occtl', 'disconnect', 'user', uname], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    except: pass
+                        if os.path.exists(OCCTL_BIN):
+                            subprocess.run([OCCTL_BIN, 'disconnect', 'user', uname], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    except Exception as e:
+                        self._log(f"Cisco kill error: {e}")
                     
-                    success, msg = True, "Kill commands sent"
+                    success, msg = True, "Kill commands sent for all protocols"
 
                 elif cmd == 'enable_user':
                     Path(CCD_DIR).mkdir(parents=True, exist_ok=True)
@@ -283,10 +294,28 @@ class StatusHandler(BaseHTTPRequestHandler):
                 elif cmd == 'delete_user_completely':
                     (Path(CCD_DIR)/uname).unlink(missing_ok=True)
                     (Path(OVPN_FILES_DIR)/f"{uname}.ovpn").unlink(missing_ok=True)
+                    
                     try:
-                        subprocess.run(['occtl', 'disconnect', 'user', uname], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        if os.path.exists(OCCTL_BIN):
+                            subprocess.run([OCCTL_BIN, 'disconnect', 'user', uname], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     except: pass
-                    success, msg = True, "User deleted from node"
+
+                    try:
+                        if os.path.exists(L2TP_ACTIVE_FILE):
+                            with open(L2TP_ACTIVE_FILE, 'r') as f:
+                                lines = f.readlines()
+                            for line in lines:
+                                parts = line.strip().split(':')
+                                if len(parts) == 2 and parts[0] == uname:
+                                    pid_file = f"/var/run/{parts[1]}.pid"
+                                    if os.path.exists(pid_file):
+                                        with open(pid_file) as pf:
+                                            pid = pf.read().strip()
+                                            if pid.isdigit(): 
+                                                subprocess.run(["kill", "-9", pid], check=False)
+                    except: pass
+
+                    success, msg = True, "User deleted and disconnected from node"
                 
                 results.append({"username": uname, "success": success, "message": msg})
 
