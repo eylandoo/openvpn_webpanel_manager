@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import subprocess
 import fcntl
-import base64
+import base64  # <--- اضافه شده برای سیسکو
 
 PORT = 7506
 OPENVPN_CONF_DIR = '/etc/openvpn/server/'
@@ -17,8 +17,6 @@ CCD_DIR = '/etc/openvpn/server/ccd/'
 OVPN_FILES_DIR = '/root/ovpnfiles/'
 L2TP_ACTIVE_FILE = "/dev/shm/active_l2tp_users"
 OCCTL_BIN = "/usr/bin/occtl"
-L2TP_SECRETS_FILE = "/etc/ppp/chap-secrets"
-CISCO_SECRETS_FILE = "/etc/ocserv/ocpasswd"
 
 class StatusHandler(BaseHTTPRequestHandler):
     def _log(self, message):
@@ -244,7 +242,38 @@ class StatusHandler(BaseHTTPRequestHandler):
                 uname = item.get('username')
                 success, msg = False, "Unknown"
                 
-                if cmd == 'kill':
+                # --- بخش جدید: هندل کردن آپدیت L2TP ---
+                if cmd == 'update_l2tp_secrets':
+                    content = item.get('content')
+                    if content:
+                        try:
+                            # ذخیره فایل chap-secrets
+                            with open('/etc/ppp/chap-secrets', 'w') as f:
+                                f.write(content)
+                            success, msg = True, "L2TP secrets updated"
+                        except Exception as e:
+                            self._log(f"L2TP update error: {e}")
+                            success, msg = False, str(e)
+                    else:
+                        success, msg = False, "No content for L2TP"
+
+                # --- بخش جدید: هندل کردن آپدیت Cisco ---
+                elif cmd == 'update_cisco_secrets':
+                    content_b64 = item.get('content')
+                    if content_b64:
+                        try:
+                            # دیکود کردن Base64 و ذخیره باینری
+                            content = base64.b64decode(content_b64)
+                            with open('/etc/ocserv/ocpasswd', 'wb') as f:
+                                f.write(content)
+                            success, msg = True, "Cisco secrets updated"
+                        except Exception as e:
+                            self._log(f"Cisco update error: {e}")
+                            success, msg = False, str(e)
+                    else:
+                        success, msg = False, "No content for Cisco"
+
+                elif cmd == 'kill':
                     try:
                         mgmt_ports = self._get_all_management_ports()
                         for port in mgmt_ports:
@@ -319,35 +348,6 @@ class StatusHandler(BaseHTTPRequestHandler):
                     except: pass
 
                     success, msg = True, "User deleted and disconnected from node"
-
-                elif cmd == 'update_l2tp_secrets':
-                    content = item.get('content')
-                    if content is not None:
-                        try:
-                            # Write raw text content
-                            with open(L2TP_SECRETS_FILE, 'w') as f:
-                                f.write(content)
-                            os.chmod(L2TP_SECRETS_FILE, 0o600)
-                            success, msg = True, "L2TP secrets updated"
-                        except Exception as e:
-                            success, msg = False, f"L2TP update failed: {e}"
-                    else:
-                        success, msg = False, "No content provided"
-
-                elif cmd == 'update_cisco_secrets':
-                    b64_content = item.get('content')
-                    if b64_content is not None:
-                        try:
-                            # Decode base64 and write
-                            binary_content = base64.b64decode(b64_content)
-                            with open(CISCO_SECRETS_FILE, 'wb') as f:
-                                f.write(binary_content)
-                            os.chmod(CISCO_SECRETS_FILE, 0o600)
-                            success, msg = True, "Cisco secrets updated"
-                        except Exception as e:
-                            success, msg = False, f"Cisco update failed: {e}"
-                    else:
-                        success, msg = False, "No content provided"
                 
                 results.append({"username": uname, "success": success, "message": msg})
 
