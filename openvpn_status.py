@@ -1,5 +1,6 @@
 #!/usr/bin/python3
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from socketserver import ThreadingMixIn
 import socket
 import json
 import time
@@ -9,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import subprocess
 import fcntl
-import base64  # <--- اضافه شده برای سیسکو
+import base64
 
 PORT = 7506
 OPENVPN_CONF_DIR = '/etc/openvpn/server/'
@@ -17,6 +18,9 @@ CCD_DIR = '/etc/openvpn/server/ccd/'
 OVPN_FILES_DIR = '/root/ovpnfiles/'
 L2TP_ACTIVE_FILE = "/dev/shm/active_l2tp_users"
 OCCTL_BIN = "/usr/bin/occtl"
+
+class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    pass
 
 class StatusHandler(BaseHTTPRequestHandler):
     def _log(self, message):
@@ -242,12 +246,10 @@ class StatusHandler(BaseHTTPRequestHandler):
                 uname = item.get('username')
                 success, msg = False, "Unknown"
                 
-                # --- بخش جدید: هندل کردن آپدیت L2TP ---
                 if cmd == 'update_l2tp_secrets':
                     content = item.get('content')
                     if content:
                         try:
-                            # ذخیره فایل chap-secrets
                             with open('/etc/ppp/chap-secrets', 'w') as f:
                                 f.write(content)
                             success, msg = True, "L2TP secrets updated"
@@ -257,12 +259,10 @@ class StatusHandler(BaseHTTPRequestHandler):
                     else:
                         success, msg = False, "No content for L2TP"
 
-                # --- بخش جدید: هندل کردن آپدیت Cisco ---
                 elif cmd == 'update_cisco_secrets':
                     content_b64 = item.get('content')
                     if content_b64:
                         try:
-                            # دیکود کردن Base64 و ذخیره باینری
                             content = base64.b64decode(content_b64)
                             with open('/etc/ocserv/ocpasswd', 'wb') as f:
                                 f.write(content)
@@ -361,7 +361,7 @@ class StatusHandler(BaseHTTPRequestHandler):
 
 def run_server():
     try:
-        server = HTTPServer(('0.0.0.0', PORT), StatusHandler)
+        server = ThreadingHTTPServer(('0.0.0.0', PORT), StatusHandler)
         server.serve_forever()
     except OSError as e:
         print(f"Error: {e}")
