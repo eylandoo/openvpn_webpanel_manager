@@ -9,7 +9,6 @@ if [[ "$OS_VERSION" != "22.04" || "$ARCHITECTURE" != "x86_64" ]]; then
     exit 1
 fi
 
-
 stty erase ^? 2>/dev/null
 
 if [[ "$1" == "panel" && "$2" == "restart" ]]; then
@@ -40,6 +39,33 @@ BLUE='\033[1;34m'
 CYAN='\033[1;36m'
 RESET='\033[0m'
 
+draw_progress_bar() {
+    local duration=${1}
+    local block_char="█"
+    local empty_char="░"
+    local width=50
+    local percentage=0
+    local step=$(echo "scale=3; 100 / ($duration * 10)" | bc)
+    
+    echo -ne "\n"
+    
+    for ((i=0; i<=$((duration * 10)); i++)); do
+        percentage=$(echo "scale=0; $i * $step" | bc)
+        if (( $(echo "$percentage > 100" | bc -l) )); then percentage=100; fi
+        
+        local filled_len=$(echo "scale=0; $width * $percentage / 100" | bc)
+        local empty_len=$((width - filled_len))
+        
+        local bar=""
+        for ((j=0; j<filled_len; j++)); do bar="${bar}${block_char}"; done
+        for ((j=0; j<empty_len; j++)); do bar="${bar}${empty_char}"; done
+        
+        echo -ne "\r${BLUE}[${bar}] ${percentage}%${RESET}"
+        sleep 0.1
+    done
+    echo -ne "\n"
+}
+
 uninstall_openvpn() {
     echo -e "${YELLOW}[+] Uninstalling OpenVPN...${RESET}"
     apt-get remove --purge openvpn -y
@@ -59,6 +85,26 @@ uninstall_web_panel() {
     echo -e "${GREEN}[✔] OpenVPN Web Panel has been uninstalled successfully!${RESET}"
 }
 
+uninstall_cisco() {
+    echo -e "${YELLOW}[+] Uninstalling Cisco AnyConnect (ocserv)...${RESET}"
+    systemctl stop ocserv
+    systemctl disable ocserv
+    apt-get remove --purge ocserv -y
+    rm -rf /etc/ocserv
+    echo -e "${GREEN}[✔] Cisco AnyConnect has been uninstalled successfully!${RESET}"
+}
+
+uninstall_l2tp() {
+    echo -e "${YELLOW}[+] Uninstalling L2TP/IPsec...${RESET}"
+    systemctl stop xl2tpd
+    systemctl disable xl2tpd
+    systemctl stop ipsec
+    systemctl disable ipsec
+    apt-get remove --purge xl2tpd strongswan strongswan-pki -y
+    rm -rf /etc/xl2tpd /etc/ipsec.conf /etc/ipsec.secrets /etc/ipsec.d
+    echo -e "${GREEN}[✔] L2TP/IPsec has been uninstalled successfully!${RESET}"
+}
+
 check_openvpn_installed() {
     command -v openvpn &>/dev/null && echo "installed" || echo "not_installed"
 }
@@ -69,6 +115,14 @@ check_web_panel_installed() {
     else
         echo "not_installed"
     fi
+}
+
+check_cisco_installed() {
+    command -v ocserv &>/dev/null && echo "installed" || echo "not_installed"
+}
+
+check_l2tp_installed() {
+    command -v xl2tpd &>/dev/null && echo "installed" || echo "not_installed"
 }
 
 change_username() {
@@ -193,7 +247,7 @@ show_panel_info() {
 }
 
 show_menu() {
-reset
+    reset
     echo -e "${CYAN}"
     echo "███████╗██╗   ██╗██╗      █████╗ ███╗   ██╗"
     echo "██╔════╝╚██╗ ██╔╝██║     ██╔══██╗████╗  ██║"
@@ -210,14 +264,18 @@ reset
     echo "╚═╝     ╚═╝  ╚═╝╚═╝  ╚═══╝╚══════╝╚══════╝ "
     echo -e "${RESET}"
     echo -e "${CYAN}====================================="
-    echo -e "      🚀 OpenVPN Management Menu     "
+    echo -e "      🚀 VPN Management Dashboard    "
     echo -e "=====================================${RESET}"
 
     openvpn_status=$(check_openvpn_installed)
     web_panel_status=$(check_web_panel_installed)
+    cisco_status=$(check_cisco_installed)
+    l2tp_status=$(check_l2tp_installed)
 
-    [[ "$openvpn_status" == "installed" ]] && echo -e "${GREEN}[✔] OpenVPN Core is installed${RESET}" || echo -e "${RED}[✘] OpenVPN Core is NOT installed${RESET}"
-    [[ "$web_panel_status" == "installed" ]] && echo -e "${GREEN}[✔] OpenVPN Web Panel is installed${RESET}" || echo -e "${RED}[✘] OpenVPN Web Panel is NOT installed${RESET}"
+    [[ "$openvpn_status" == "installed" ]] && echo -e "${GREEN}[✔] OpenVPN Core     : Installed${RESET}" || echo -e "${RED}[✘] OpenVPN Core     : Not Installed${RESET}"
+    [[ "$web_panel_status" == "installed" ]] && echo -e "${GREEN}[✔] OpenVPN Web Panel: Installed${RESET}" || echo -e "${RED}[✘] OpenVPN Web Panel: Not Installed${RESET}"
+    [[ "$cisco_status" == "installed" ]] && echo -e "${GREEN}[✔] Cisco AnyConnect : Installed${RESET}" || echo -e "${RED}[✘] Cisco AnyConnect : Not Installed${RESET}"
+    [[ "$l2tp_status" == "installed" ]] && echo -e "${GREEN}[✔] L2TP/IPsec       : Installed${RESET}" || echo -e "${RED}[✘] L2TP/IPsec       : Not Installed${RESET}"
 
     echo ""
 
@@ -231,8 +289,18 @@ reset
         options+=("Install OpenVPN Web Panel")
     fi
 
+    if [[ "$cisco_status" == "not_installed" ]]; then
+        options+=("Install Cisco AnyConnect")
+    fi
+
+    if [[ "$l2tp_status" == "not_installed" ]]; then
+        options+=("Install L2TP/IPsec")
+    fi
+
+    echo "-------------------------------------"
+
     if [[ "$openvpn_status" == "installed" ]]; then
-        options+=("Uninstall OpenVPN")
+        options+=("Uninstall OpenVPN Core")
     fi
 
     if [[ "$web_panel_status" == "installed" ]]; then
@@ -242,14 +310,23 @@ reset
         options+=("Update Web Panel")
     fi
 
+    if [[ "$cisco_status" == "installed" ]]; then
+        options+=("Uninstall Cisco AnyConnect")
+    fi
+
+    if [[ "$l2tp_status" == "installed" ]]; then
+        options+=("Uninstall L2TP/IPsec")
+    fi
+
     options+=("Exit")
 
     for i in "${!options[@]}"; do
         index=$((i+1))
         text="${options[$i]}"
         case "$text" in
-            "Install OpenVPN Core"|"Install OpenVPN Web Panel") color="${GREEN}" ;;
-            "Uninstall OpenVPN"|"Uninstall OpenVPN Web Panel") color="${YELLOW}" ;;
+            "Install"*) color="${GREEN}" ;;
+            "Uninstall"*) color="${YELLOW}" ;;
+            "Exit") color="${RED}" ;;
             *) color="${RESET}" ;;
         esac
         echo -e " $index) ${color}${text}${RESET}"
@@ -270,25 +347,74 @@ reset
         "Install OpenVPN Core")
             echo -e "${YELLOW}Installing OpenVPN...${RESET}"
             bash install_vpn.sh ;;
+            
         "Install OpenVPN Web Panel")
             echo -e "${YELLOW}Installing OpenVPN Web Panel...${RESET}"
             bash install_web_panel.sh ;;
-        "Uninstall OpenVPN")
+
+        "Install Cisco AnyConnect")
+            clear
+            echo -e "${CYAN}Downloading Cisco Installation Script...${RESET}"
+            wget -q -O /root/install_cisco.sh https://raw.githubusercontent.com/eylandoo/openvpn_webpanel_manager/main/install_cisco.sh
+            chmod +x /root/install_cisco.sh
+            echo -e "${GREEN}Download Complete.${RESET}"
+            echo -e "${YELLOW}Starting Installation Process...${RESET}"
+            draw_progress_bar 2
+            clear
+            bash /root/install_cisco.sh
+            rm -f /root/install_cisco.sh
+            echo -e "${GREEN}Installation Finalizing...${RESET}"
+            draw_progress_bar 1
+            echo -e "${GREEN}[✔] Cisco AnyConnect Installation Completed.${RESET}"
+            read -p "Press Enter to return to menu..." ;;
+
+        "Install L2TP/IPsec")
+            clear
+            echo -e "${CYAN}Downloading L2TP Installation Script...${RESET}"
+            wget -q -O /root/install_l2tp.sh https://raw.githubusercontent.com/eylandoo/openvpn_webpanel_manager/main/install_l2tp.sh
+            chmod +x /root/install_l2tp.sh
+            echo -e "${GREEN}Download Complete.${RESET}"
+            echo -e "${YELLOW}Starting Installation Process...${RESET}"
+            draw_progress_bar 2
+            clear
+            bash /root/install_l2tp.sh
+            rm -f /root/install_l2tp.sh
+            echo -e "${GREEN}Installation Finalizing...${RESET}"
+            draw_progress_bar 1
+            echo -e "${GREEN}[✔] L2TP/IPsec Installation Completed.${RESET}"
+            read -p "Press Enter to return to menu..." ;;
+            
+        "Uninstall OpenVPN Core")
             echo -e "${YELLOW}Are you sure you want to uninstall OpenVPN? (y/n): ${RESET}"
             read confirm
             [[ "$confirm" =~ ^[yY]$ ]] && uninstall_openvpn || echo -e "${YELLOW}Uninstall canceled.${RESET}" ;;
+            
         "Uninstall OpenVPN Web Panel")
             echo -e "${YELLOW}Are you sure you want to uninstall OpenVPN Web Panel? (y/n): ${RESET}"
             read confirm
             [[ "$confirm" =~ ^[yY]$ ]] && uninstall_web_panel || echo -e "${YELLOW}Uninstall canceled.${RESET}" ;;
+
+        "Uninstall Cisco AnyConnect")
+            echo -e "${YELLOW}Are you sure you want to uninstall Cisco AnyConnect? (y/n): ${RESET}"
+            read confirm
+            [[ "$confirm" =~ ^[yY]$ ]] && uninstall_cisco || echo -e "${YELLOW}Uninstall canceled.${RESET}" ;;
+
+        "Uninstall L2TP/IPsec")
+            echo -e "${YELLOW}Are you sure you want to uninstall L2TP/IPsec? (y/n): ${RESET}"
+            read confirm
+            [[ "$confirm" =~ ^[yY]$ ]] && uninstall_l2tp || echo -e "${YELLOW}Uninstall canceled.${RESET}" ;;
+            
         "Show Web Panel Info")
             show_panel_info ;;
+            
         "Panel Settings")
             show_panel_settings_menu ;;
+            
         "Update Web Panel")
             echo -e "${YELLOW}Updating Web Panel...${RESET}"
             wget -q -O /root/update_app.sh https://eylanpanel.top/update_app.sh && chmod +x /root/update_app.sh && /root/update_app.sh
             read -p "Press Enter to return to menu..." ;;
+            
         "Exit")
             echo -e "${GREEN}Exiting...${RESET}"
             exit 0 ;;
