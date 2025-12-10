@@ -1,23 +1,23 @@
 #!/bin/bash
-# Cisco AnyConnect (ocserv) Installer - Self Signed Version
-# Args: $1 = Port (Default 4443)
+set -e
 
 CISCO_PORT="${1:-4443}"
-
 export DEBIAN_FRONTEND=noninteractive
+
+echo ">>> Updating and installing packages..."
 apt-get update
 apt-get install -y ocserv gnutls-bin iptables-persistent
 
-# Create Config Directory
 mkdir -p /etc/ocserv
-touch /etc/ocserv/ocpasswd
+if [ ! -f /etc/ocserv/ocpasswd ]; then
+    touch /etc/ocserv/ocpasswd
+fi
+
 cd /etc/ocserv
 
-# --- START: Generate Fake (Self-Signed) SSL Certificates ---
-echo "Generating fake SSL certificates..."
-
-# 1. CA Template
-cat > ca.tmpl <<EOF
+if [ ! -f /etc/ocserv/server-cert.pem ] || [ ! -f /etc/ocserv/server-key.pem ]; then
+    echo ">>> Generating Certificates..."
+    cat > ca.tmpl <<EOF
 cn = "VPN CA"
 organization = "Cisco VPN"
 serial = 1
@@ -27,14 +27,12 @@ signing_key
 cert_signing_key
 crl_signing_key
 EOF
-
-# 2. Generate CA Key and Cert
-certtool --generate-privkey --outfile ca-key.pem
-certtool --generate-self-signed --load-privkey ca-key.pem --template ca.tmpl --outfile ca-cert.pem
-
-# 3. Server Template (Uses IP or generic name)
-MY_IP=$(hostname -I | awk '{print $1}')
-cat > server.tmpl <<EOF
+    certtool --generate-privkey --outfile ca-key.pem
+    certtool --generate-self-signed --load-privkey ca-key.pem --template ca.tmpl --outfile ca-cert.pem
+    
+    MY_IP=$(curl -s https://api.ipify.org || hostname -I | awk '{print $1}')
+    
+    cat > server.tmpl <<EOF
 cn = "$MY_IP"
 organization = "Cisco VPN"
 expiration_days = 3650
@@ -42,18 +40,16 @@ signing_key
 encryption_key
 tls_www_server
 EOF
+    certtool --generate-privkey --outfile server-key.pem
+    certtool --generate-certificate --load-privkey server-key.pem --load-ca-certificate ca-cert.pem --load-ca-privkey ca-key.pem --template server.tmpl --outfile server-cert.pem
+    rm -f ca.tmpl server.tmpl
+fi
 
-# 4. Generate Server Key and Cert
-certtool --generate-privkey --outfile server-key.pem
-certtool --generate-certificate --load-privkey server-key.pem --load-ca-certificate ca-cert.pem --load-ca-privkey ca-key.pem --template server.tmpl --outfile server-cert.pem
+if [ -f /etc/ocserv/ocserv.conf ]; then
+    mv /etc/ocserv/ocserv.conf /etc/ocserv/ocserv.conf.bak.$(date +%s)
+fi
 
-# Cleanup templates
-rm ca.tmpl server.tmpl
-echo "Fake SSL generated at /etc/ocserv/server-cert.pem"
-# --- END: SSL Generation ---
-
-
-# Create Config File (Pointing to the NEW fake certs)
+echo ">>> Writing Config..."
 cat > /etc/ocserv/ocserv.conf <<EOF
 auth = "plain[passwd=/etc/ocserv/ocpasswd]"
 tcp-port = $CISCO_PORT
@@ -61,18 +57,15 @@ udp-port = $CISCO_PORT
 run-as-user = nobody
 run-as-group = daemon
 socket-file = /var/run/ocserv-socket
-
-# Using Self-Signed Certs
 server-cert = /etc/ocserv/server-cert.pem
 server-key = /etc/ocserv/server-key.pem
 ca-cert = /etc/ocserv/ca-cert.pem
-
 isolate-workers = false
 max-clients = 1024
 max-same-clients = 0
 keepalive = 32400
-dpd = 90
-mobile-dpd = 1800
+dpd = 10
+mobile-dpd = 25
 switch-to-tcp-timeout = 25
 try-mtu-discovery = true
 server-leaked-dns = true
@@ -89,7 +82,7 @@ rekey-method = ssl
 use-occtl = true
 pid-file = /var/run/ocserv.pid
 device = vpns
-predictable-ips = true
+predictable-ips = false
 default-domain = example.com
 ipv4-network = 192.168.100.0
 ipv4-netmask = 255.255.255.0
@@ -100,23 +93,33 @@ cisco-client-compat = true
 dtls-legacy = true
 EOF
 
-# Enable IP Forwarding
+echo ">>> Applying System Settings..."
 sed -i 's/#net.ipv4.ip_forward=1/net.ipv4.ip_forward=1/' /etc/sysctl.conf
-sysctl -p
+sysctl -p > /dev/null || true
 
-# Firewall Rules
-iptables -I INPUT -p tcp --dport $CISCO_PORT -j ACCEPT
-iptables -I INPUT -p udp --dport $CISCO_PORT -j ACCEPT
-iptables -I FORWARD -i vpns+ -j ACCEPT
-iptables -I FORWARD -o vpns+ -j ACCEPT
-# Detect Main Interface dynamically
+add_rule() {
+    iptables -C "$@" 2>/dev/null || iptables -I "$@"
+}
+
+add_rule INPUT -p tcp --dport $CISCO_PORT -j ACCEPT
+add_rule INPUT -p udp --dport $CISCO_PORT -j ACCEPT
+add_rule FORWARD -i vpns+ -j ACCEPT
+add_rule FORWARD -o vpns+ -j ACCEPT
+add_rule FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+
 MAIN_IFACE=$(ip route get 1.1.1.1 | awk '{print $5; exit}')
-iptables -t nat -I POSTROUTING -s 192.168.100.0/24 -o $MAIN_IFACE -j MASQUERADE
+iptables -t nat -C POSTROUTING -s 192.168.100.0/24 -o $MAIN_IFACE -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING -s 192.168.100.0/24 -o $MAIN_IFACE -j MASQUERADE
+
 netfilter-persistent save > /dev/null 2>&1 || true
 
-# Enable and Restart Service
+echo ">>> Restarting Service..."
 systemctl unmask ocserv || true
 systemctl enable ocserv
 systemctl restart ocserv
 
-echo "✅ Cisco AnyConnect (ocserv) installed on port $CISCO_PORT with Self-Signed SSL."
+if systemctl is-active --quiet ocserv; then
+    echo "SUCCESS: Cisco AnyConnect (Ocserv) installed and running on port $CISCO_PORT"
+else
+    echo "ERROR: Failed to start Ocserv service. Check logs: journalctl -u ocserv"
+    exit 1
+fi
