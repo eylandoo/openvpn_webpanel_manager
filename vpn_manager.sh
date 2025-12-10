@@ -222,14 +222,23 @@ show_panel_info() {
     echo -e "${BLUE}systemctl restart openvpn-server@server${RESET}"
     echo -e "${YELLOW}To restart Web Panel:${RESET}"
     echo -e "${BLUE}systemctl restart openvpn_manager${RESET}"
+    echo -e "${YELLOW}To restart Cisco AnyConnect:${RESET}"
+    echo -e "${BLUE}systemctl restart ocserv${RESET}"
+    echo -e "${YELLOW}To restart L2TP/IPsec:${RESET}"
+    echo -e "${BLUE}systemctl restart xl2tpd${RESET}"
 
     echo -e "\n${CYAN}========= Log Monitoring =========${RESET}"
     echo -e "${YELLOW}OpenVPN Core Logs:${RESET}"
     echo -e "${BLUE}journalctl -u openvpn-server@server -e -f${RESET}"
     echo -e "${YELLOW}Web Panel Logs:${RESET}"
     echo -e "${BLUE}journalctl -u openvpn_manager -e -f${RESET}"
+    echo -e "${YELLOW}Cisco AnyConnect Logs:${RESET}"
+    echo -e "${BLUE}journalctl -u ocserv -e -f${RESET}"
+    echo -e "${YELLOW}L2TP/IPsec Logs:${RESET}"
+    echo -e "${BLUE}journalctl -u xl2tpd -e -f${RESET}"
 
     echo -e "\n${CYAN}========= Service Status =========${RESET}"
+    
     if systemctl is-active --quiet openvpn-server@server; then
         echo -e "${GREEN}[✔] OpenVPN Core service is running${RESET}"
     else
@@ -240,6 +249,18 @@ show_panel_info() {
         echo -e "${GREEN}[✔] Web Panel service is running${RESET}"
     else
         echo -e "${RED}[✘] Web Panel service is NOT running${RESET}"
+    fi
+
+    if systemctl is-active --quiet ocserv; then
+        echo -e "${GREEN}[✔] Cisco AnyConnect service is running${RESET}"
+    else
+        echo -e "${RED}[✘] Cisco AnyConnect service is NOT running${RESET}"
+    fi
+
+    if systemctl is-active --quiet xl2tpd; then
+        echo -e "${GREEN}[✔] L2TP service is running${RESET}"
+    else
+        echo -e "${RED}[✘] L2TP service is NOT running${RESET}"
     fi
 
     echo
