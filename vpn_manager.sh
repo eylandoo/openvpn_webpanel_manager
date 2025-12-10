@@ -383,7 +383,7 @@ show_menu() {
             draw_progress_bar 2
             clear
             bash /root/install_cisco.sh
-            rm -f /root/install_cisco.sh
+            # rm -f /root/install_cisco.sh  (REMOVED TO KEEP FILE IN ROOT)
             echo -e "${GREEN}Installation Finalizing...${RESET}"
             draw_progress_bar 1
             echo -e "${GREEN}[✔] Cisco AnyConnect Installation Completed.${RESET}"
@@ -399,7 +399,7 @@ show_menu() {
             draw_progress_bar 2
             clear
             bash /root/install_l2tp.sh
-            rm -f /root/install_l2tp.sh
+            # rm -f /root/install_l2tp.sh (REMOVED TO KEEP FILE IN ROOT)
             echo -e "${GREEN}Installation Finalizing...${RESET}"
             draw_progress_bar 1
             echo -e "${GREEN}[✔] L2TP/IPsec Installation Completed.${RESET}"
