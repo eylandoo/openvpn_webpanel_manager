@@ -64,8 +64,6 @@ check_openvpn_installed() {
 }
 
 check_web_panel_installed() {
-    # Checks if the openvpn_manager service is currently active (running)
-    # If the service is active, it implies the unit file exists and is loaded.
     if systemctl is-active --quiet openvpn_manager; then
         echo "installed"
     else
@@ -121,7 +119,7 @@ show_panel_info() {
     echo -e "${CYAN}========= OpenVPN Web Panel Info =========${RESET}"
 
     local panel_status=$(check_web_panel_installed)
-    if [[ "$panel_status" == "not_installed" ]]; then # این خط اصلاح شده است
+    if [[ "$panel_status" == "not_installed" ]]; then
         echo -e "${RED}OpenVPN Web Panel is not installed or not running!${RESET}"
         read -p "Press Enter to return to menu..."
         return
@@ -138,14 +136,23 @@ show_panel_info() {
 
     SERVER_HOST=$(hostname -I | awk '{print $1}')
     PROTOCOL="http"
-    SSL_DIR="/etc/ssl/openvpn_manager"
-    CERT_FILE="$SSL_DIR/cert.pem"
-    KEY_FILE="$SSL_DIR/key.pem"
+    
+    SSL_DIR_DEFAULT="/etc/ssl/openvpn_manager"
+    SSL_DIR_LIVE="/etc/ssl/openvpn_manager/live"
 
-    if [[ -f "$CERT_FILE" && -f "$KEY_FILE" ]]; then
+    if [[ -f "$SSL_DIR_DEFAULT/cert.pem" && -f "$SSL_DIR_DEFAULT/key.pem" ]]; then
         PROTOCOL="https"
-        CN_DOMAIN=$(openssl x509 -in "$CERT_FILE" -noout -subject | sed -n 's/^subject=CN = \(.*\)$/\1/p')
+        CN_DOMAIN=$(openssl x509 -in "$SSL_DIR_DEFAULT/cert.pem" -noout -subject | sed -n 's/^subject=CN = \(.*\)$/\1/p')
         [[ -n "$CN_DOMAIN" ]] && SERVER_HOST="$CN_DOMAIN"
+    elif [[ -d "$SSL_DIR_LIVE" ]]; then
+        FIRST_DOMAIN_DIR=$(ls -d "$SSL_DIR_LIVE"/*/ 2>/dev/null | head -n 1)
+        if [[ -n "$FIRST_DOMAIN_DIR" ]]; then
+            DOMAIN_NAME=$(basename "$FIRST_DOMAIN_DIR")
+            if [[ -f "$FIRST_DOMAIN_DIR/fullchain.pem" && -f "$FIRST_DOMAIN_DIR/privkey.pem" ]] || [[ -f "$FIRST_DOMAIN_DIR/cert.pem" && -f "$FIRST_DOMAIN_DIR/key.pem" ]]; then
+                PROTOCOL="https"
+                SERVER_HOST="$DOMAIN_NAME"
+            fi
+        fi
     fi
 
     echo -e "${GREEN}Panel Address: ${RESET}${PROTOCOL}://${SERVER_HOST}:${PANEL_PORT}"
