@@ -57,7 +57,7 @@ The panel is designed for administrators demanding granular control over user ac
 
 ### API
 * **Full Automation**: A secure, key-based RESTful API allows for programmatic management of users, including creation, editing, deletion, and status retrieval.
-
+* **Documentation**: Full API documentation is available at [**eylandoo.github.io**](https://eylandoo.github.io).
 ---
 
 ## 🛠️ Architecture & Tech Stack
