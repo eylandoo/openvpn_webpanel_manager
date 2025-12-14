@@ -1,6 +1,7 @@
 #!/bin/bash
 set -e
 
+# --- تنظیمات پیش‌فرض ---
 IPSEC_PSK="eylan"
 VPN_IP_RANGE="192.168.42.10-192.168.42.250"
 VPN_LOCAL_IP="192.168.42.1"
@@ -95,9 +96,20 @@ EOF
 touch /etc/ppp/chap-secrets
 chmod 600 /etc/ppp/chap-secrets
 
-echo ">>> Setting up Monitoring Hooks..."
+echo ">>> Setting up Monitoring Hooks (FIXED VERSION)..."
 mkdir -p /etc/ppp/ip-up.d
 mkdir -p /etc/ppp/ip-down.d
+
+if [ ! -f /etc/ppp/ip-up ]; then
+    echo '#!/bin/bash' > /etc/ppp/ip-up
+    echo '/bin/run-parts /etc/ppp/ip-up.d' >> /etc/ppp/ip-up
+    chmod +x /etc/ppp/ip-up
+fi
+if [ ! -f /etc/ppp/ip-down ]; then
+    echo '#!/bin/bash' > /etc/ppp/ip-down
+    echo '/bin/run-parts /etc/ppp/ip-down.d' >> /etc/ppp/ip-down
+    chmod +x /etc/ppp/ip-down
+fi
 
 HOOK_UP="/etc/ppp/ip-up.d/00-panel-monitor"
 cat > $HOOK_UP <<'HOOKEOF'
@@ -118,10 +130,11 @@ cat > $HOOK_DOWN <<'HOOKEOF'
 #!/bin/bash
 LOG_FILE="/dev/shm/active_l2tp_users"
 LOCK_FILE="/dev/shm/l2tp_monitor.lock"
-if [ -n "$PEERNAME" ]; then
+if [ -n "$IFNAME" ]; then
     (
         flock -x 200
-        sed -i "/^${PEERNAME}:/d" "$LOG_FILE"
+        # Only remove the line ending with this specific interface name
+        sed -i "/:${IFNAME}$/d" "$LOG_FILE"
     ) 200>"$LOCK_FILE"
 fi
 HOOKEOF
@@ -141,18 +154,15 @@ add_rule() {
 
 MAIN_IFACE=$(ip route get 1.1.1.1 | awk '{print $5; exit}')
 
-# Input Rules
 add_rule INPUT -p udp --dport 500 -j ACCEPT
 add_rule INPUT -p udp --dport 4500 -j ACCEPT
 add_rule INPUT -p udp --dport 1701 -j ACCEPT
 
-# Forwarding Rules
 add_rule FORWARD -i ppp+ -o $MAIN_IFACE -j ACCEPT
 add_rule FORWARD -i $MAIN_IFACE -o ppp+ -j ACCEPT
 
-# NAT Rule
 iptables -t nat -C POSTROUTING -s $VPN_SUBNET -o $MAIN_IFACE -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING -s $VPN_SUBNET -o $MAIN_IFACE -j MASQUERADE
 
 netfilter-persistent save > /dev/null 2>&1 || true
 
-echo "✅ L2TP installed/updated successfully. Interface: $MAIN_IFACE"
+echo "✅ L2TP installed/updated successfully with Fixed Monitoring."
