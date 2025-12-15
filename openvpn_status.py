@@ -268,7 +268,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                         
                 elif cmd == 'kill':
                     try:
-                        # 🔥 روش خشن و تضمینی برای کشتن L2TP
+                        
                         subprocess.run(["pkill", "-9", "-f", f"pppd.*name {uname}"], check=False)
                     except: pass
 
