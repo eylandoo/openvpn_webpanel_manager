@@ -106,24 +106,12 @@ class StatusHandler(BaseHTTPRequestHandler):
                                 v_ip = parts[3]
                                 rx = int(parts[5])
                                 tx = int(parts[6])
-                                
                                 c_time = time.time()
-                                ts_index = -1
                                 cid = None
                                 for i, p in enumerate(parts):
                                     if len(p) == 10 and p.isdigit() and (p.startswith('17') or p.startswith('18')):
-                                        ts_index = i
-                                        c_time = int(p)
-                                        break
-                                
-                                if ts_index != -1:
-                                    if len(parts) > ts_index + 2 and parts[ts_index+2].isdigit():
-                                        cid = int(parts[ts_index+2])
-                                    elif len(parts) > ts_index + 1 and parts[ts_index+1].isdigit():
-                                        cid = int(parts[ts_index+1])
-                                
-                                if cid is None and len(parts) >= 2 and parts[-2].isdigit():
-                                    cid = int(parts[-2])
+                                        c_time = int(p); break
+                                if len(parts) > 0 and parts[-2].isdigit(): cid = int(parts[-2])
 
                                 sessions.append({
                                     "username": uname,
@@ -147,49 +135,56 @@ class StatusHandler(BaseHTTPRequestHandler):
 
             try:
                 if os.path.exists(L2TP_ACTIVE_FILE):
-                    l2tp_map = {}
-                    with open(L2TP_ACTIVE_FILE, 'r') as f:
-                        for line in f:
-                            p = line.strip().split(':')
-                            if len(p) == 2: l2tp_map[p[1].strip()] = p[0]
+                    valid_lines = []
+                    file_dirty = False
                     
-                    if os.path.exists("/proc/net/dev"):
-                        with open("/proc/net/dev", 'r') as f:
-                            for line in f:
-                                if ':' in line:
-                                    parts = line.split(':')
-                                    iface = parts[0].strip()
-                                    if iface in l2tp_map:
-                                        stats = parts[1].split()
-                                        rx, tx = int(stats[0]), int(stats[8])
-                                        uname = l2tp_map[iface]
-                                        pid_path = f"/var/run/{iface}.pid"
-                                        ts = os.path.getmtime(pid_path) if os.path.exists(pid_path) else time.time()
-                                        
-                                        pid = 0
-                                        if os.path.exists(pid_path):
-                                            with open(pid_path) as pf: 
-                                                pstr = pf.read().strip()
-                                                if pstr.isdigit(): pid = int(pstr)
+                    with open(L2TP_ACTIVE_FILE, 'r') as f:
+                        lines = f.readlines()
+                    
+                    for line in lines:
+                        p = line.strip().split(':')
+                        if len(p) == 2: 
+                            uname = p[0]
+                            iface = p[1].strip()
+                            
+                            if os.path.exists(f"/sys/class/net/{iface}"):
+                                valid_lines.append(line)
+                                rx, tx = 0, 0
+                                try:
+                                    with open(f"/sys/class/net/{iface}/statistics/rx_bytes") as f: rx = int(f.read().strip())
+                                    with open(f"/sys/class/net/{iface}/statistics/tx_bytes") as f: tx = int(f.read().strip())
+                                except: pass
+                                
+                                pid = 0
+                                try:
+                                    with open(f"/var/run/{iface}.pid") as f: pid = int(f.read().strip())
+                                except: pass
 
-                                        sessions.append({
-                                            "username": uname,
-                                            "protocol": "L2TP",
-                                            "ip": "Remote",
-                                            "v_ip": "10.10.x.x",
-                                            "bytes_received": rx,
-                                            "bytes_sent": tx,
-                                            "connected_at": ts,
-                                            "session_id": pid
-                                        })
+                                sessions.append({
+                                    "username": uname,
+                                    "protocol": "L2TP",
+                                    "ip": "Remote",
+                                    "v_ip": "10.10.x.x",
+                                    "bytes_received": rx,
+                                    "bytes_sent": tx,
+                                    "connected_at": time.time(),
+                                    "session_id": pid
+                                })
 
-                                        legacy_key = "L2TP/IPsec"
-                                        if uname not in detailed_users: detailed_users[uname] = {}
-                                        if legacy_key not in detailed_users[uname]:
-                                            detailed_users[uname][legacy_key] = {"active": 0, "bytes_received": 0, "bytes_sent": 0}
-                                        detailed_users[uname][legacy_key]["active"] += 1
-                                        detailed_users[uname][legacy_key]["bytes_received"] += rx
-                                        detailed_users[uname][legacy_key]["bytes_sent"] += tx
+                                legacy_key = "L2TP/IPsec"
+                                if uname not in detailed_users: detailed_users[uname] = {}
+                                if legacy_key not in detailed_users[uname]:
+                                    detailed_users[uname][legacy_key] = {"active": 0, "bytes_received": 0, "bytes_sent": 0}
+                                detailed_users[uname][legacy_key]["active"] += 1
+                                detailed_users[uname][legacy_key]["bytes_received"] += rx
+                                detailed_users[uname][legacy_key]["bytes_sent"] += tx
+                            else:
+                                file_dirty = True
+                    
+                    if file_dirty:
+                        try:
+                            with open(L2TP_ACTIVE_FILE, 'w') as f: f.writelines(valid_lines)
+                        except: pass
             except: pass
 
             try:
@@ -199,13 +194,8 @@ class StatusHandler(BaseHTTPRequestHandler):
                         for u in json.loads(res.stdout):
                             uname = u.get('Username')
                             if not uname: continue
-                            ts = time.time()
-                            try: ts = datetime.strptime(u.get('Connected at',''), "%Y-%m-%d %H:%M:%S").timestamp()
-                            except: pass
                             rx, tx = int(u.get('RX', 0)), int(u.get('TX', 0))
                             
-                            cid = u.get('ID')
-
                             sessions.append({
                                 "username": uname,
                                 "protocol": "Cisco",
@@ -213,8 +203,8 @@ class StatusHandler(BaseHTTPRequestHandler):
                                 "v_ip": u.get('VPN IP', 'N/A'),
                                 "bytes_received": rx,
                                 "bytes_sent": tx,
-                                "connected_at": ts,
-                                "session_id": cid
+                                "connected_at": time.time(),
+                                "session_id": u.get('ID')
                             })
 
                             legacy_key = "Cisco AnyConnect"
@@ -247,7 +237,8 @@ class StatusHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data_json.encode('utf-8'))
 
-        except: self.send_response(500)
+        except Exception as e: 
+            self.send_error(500, str(e))
 
     def do_POST(self):
         try:
@@ -276,57 +267,30 @@ class StatusHandler(BaseHTTPRequestHandler):
                         except Exception as e: success, msg = False, str(e)
                         
                 elif cmd == 'kill':
-                    target_sid = item.get('session_id')
-                    target_proto = item.get('protocol', '')
-                    target_mgmt = item.get('mgmt_port')
-                    
-                    killed_specific = False
+                    try:
+                        subprocess.run(["pkill", "-9", "-f", f"pppd.*name {uname}"], check=False)
+                    except: pass
 
-                    if target_sid:
-                        if 'OpenVPN' in target_proto and target_mgmt:
-                            try:
-                                with socket.create_connection(('127.0.0.1', target_mgmt), timeout=1) as s:
-                                    s.recv(1024)
-                                    s.sendall(f"client-kill {target_sid}\n".encode())
-                                    s.recv(1024)
-                                    killed_specific = True
-                                    msg = f"Killed CID {target_sid}"
-                            except: pass
-                        elif 'Cisco' in target_proto:
-                            if os.path.exists(OCCTL_BIN):
-                                try:
-                                    subprocess.run([OCCTL_BIN, 'disconnect', 'id', str(target_sid)], check=False, stdout=subprocess.DEVNULL)
-                                    killed_specific = True
-                                    msg = f"Killed Cisco ID {target_sid}"
-                                except: pass
-                        elif 'L2TP' in target_proto:
-                            try:
-                                subprocess.run(["kill", "-9", str(target_sid)], check=False)
-                                killed_specific = True
-                                msg = f"Killed L2TP PID {target_sid}"
-                            except: pass
+                    if os.path.exists(OCCTL_BIN):
+                        try: subprocess.run([OCCTL_BIN, 'disconnect', 'user', uname], check=False, stdout=subprocess.DEVNULL)
+                        except: pass
 
-                    if not killed_specific:
+                    for port in self._get_all_management_ports():
                         try:
-                            for port in self._get_all_management_ports():
-                                try:
-                                    with socket.create_connection(('127.0.0.1', port), timeout=1) as s:
-                                        s.recv(1024); s.sendall(f"kill {uname}\n".encode()); s.recv(1024)
-                                except: pass
-                            if os.path.exists(L2TP_ACTIVE_FILE):
-                                with open(L2TP_ACTIVE_FILE, 'r') as f:
-                                    for line in f:
-                                        parts = line.strip().split(':')
-                                        if len(parts) == 2 and parts[0] == uname:
-                                            pid_file = f"/var/run/{parts[1]}.pid"
-                                            if os.path.exists(pid_file):
-                                                with open(pid_file) as pf: subprocess.run(["kill", "-9", pf.read().strip()], check=False)
-                            if os.path.exists(OCCTL_BIN):
-                                subprocess.run([OCCTL_BIN, 'disconnect', 'user', uname], check=False, stdout=subprocess.DEVNULL)
-                            msg = "Killed all (Fallback)"
+                            with socket.create_connection(('127.0.0.1', port), timeout=1) as s:
+                                s.recv(1024); s.sendall(f"kill {uname}\n".encode()); s.recv(1024)
                         except: pass
                     
-                    success = True
+                    if os.path.exists(L2TP_ACTIVE_FILE):
+                        try:
+                            lines = []
+                            with open(L2TP_ACTIVE_FILE, 'r') as f: lines = f.readlines()
+                            with open(L2TP_ACTIVE_FILE, 'w') as f:
+                                for line in lines:
+                                    if not line.startswith(f"{uname}:"): f.write(line)
+                        except: pass
+
+                    success, msg = True, "Kill Signal Sent (Aggressive)"
 
                 elif cmd == 'enable_user':
                     Path(CCD_DIR).mkdir(parents=True, exist_ok=True)
