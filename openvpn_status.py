@@ -268,6 +268,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                         
                 elif cmd == 'kill':
                     try:
+                        # 🔥 روش خشن و تضمینی برای کشتن L2TP
                         subprocess.run(["pkill", "-9", "-f", f"pppd.*name {uname}"], check=False)
                     except: pass
 
@@ -281,6 +282,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                                 s.recv(1024); s.sendall(f"kill {uname}\n".encode()); s.recv(1024)
                         except: pass
                     
+                    # پاکسازی فایل لاگ برای اطمینان
                     if os.path.exists(L2TP_ACTIVE_FILE):
                         try:
                             lines = []
@@ -290,7 +292,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                                     if not line.startswith(f"{uname}:"): f.write(line)
                         except: pass
 
-                    success, msg = True, "Kill Signal Sent (Aggressive)"
+                    success, msg = True, "Kill Signal Sent (Turbo)"
 
                 elif cmd == 'enable_user':
                     Path(CCD_DIR).mkdir(parents=True, exist_ok=True)
