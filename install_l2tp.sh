@@ -1,7 +1,6 @@
 #!/bin/bash
 set -e
 
-# --- تنظیمات پیش‌فرض ---
 IPSEC_PSK="eylan"
 VPN_IP_RANGE="192.168.42.10-192.168.42.250"
 VPN_LOCAL_IP="192.168.42.1"
@@ -9,16 +8,13 @@ VPN_SUBNET="192.168.42.0/24"
 
 export DEBIAN_FRONTEND=noninteractive
 
-echo ">>> Updating and installing packages..."
 apt-get update
 apt-get install -y strongswan xl2tpd ppp net-tools iptables-persistent
 
-echo ">>> Enabling IP Forwarding..."
 sed -i 's/#net.ipv4.ip_forward=1/net.ipv4.ip_forward=1/' /etc/sysctl.conf
 sysctl -w net.ipv4.ip_forward=1 > /dev/null 2>&1
 sysctl -p > /dev/null 2>&1 || true
 
-echo ">>> Configuring IPsec..."
 if [ -f /etc/ipsec.conf ]; then mv /etc/ipsec.conf /etc/ipsec.conf.bak.$(date +%s); fi
 cat > /etc/ipsec.conf <<EOF
 config setup
@@ -30,8 +26,8 @@ conn %default
     keyingtries=%forever
     ike=aes256-sha1-modp1024,3des-sha1-modp1024!
     esp=aes256-sha1,3des-sha1!
-    dpddelay=30
-    dpdtimeout=120
+    dpddelay=5
+    dpdtimeout=10
     dpdaction=clear
 conn L2TP-PSK-NAT
     rightsubnet=vhost:%priv
@@ -57,7 +53,6 @@ cat > /etc/ipsec.secrets <<EOF
 EOF
 chmod 600 /etc/ipsec.secrets
 
-echo ">>> Configuring xl2tpd..."
 if [ -f /etc/xl2tpd/xl2tpd.conf ]; then mv /etc/xl2tpd/xl2tpd.conf /etc/xl2tpd/xl2tpd.conf.bak.$(date +%s); fi
 cat > /etc/xl2tpd/xl2tpd.conf <<EOF
 [global]
@@ -75,7 +70,6 @@ pppoptfile = /etc/ppp/options.xl2tpd
 length bit = yes
 EOF
 
-echo ">>> Configuring PPP options..."
 if [ -f /etc/ppp/options.xl2tpd ]; then mv /etc/ppp/options.xl2tpd /etc/ppp/options.xl2tpd.bak.$(date +%s); fi
 cat > /etc/ppp/options.xl2tpd <<EOF
 require-mschap-v2
@@ -89,14 +83,13 @@ hide-password
 modem
 name l2tpd
 proxyarp
-lcp-echo-interval 30
-lcp-echo-failure 4
+lcp-echo-interval 1
+lcp-echo-failure 3
 EOF
 
 touch /etc/ppp/chap-secrets
 chmod 600 /etc/ppp/chap-secrets
 
-echo ">>> Setting up Monitoring Hooks (FIXED VERSION)..."
 mkdir -p /etc/ppp/ip-up.d
 mkdir -p /etc/ppp/ip-down.d
 
@@ -115,12 +108,8 @@ HOOK_UP="/etc/ppp/ip-up.d/00-panel-monitor"
 cat > $HOOK_UP <<'HOOKEOF'
 #!/bin/bash
 LOG_FILE="/dev/shm/active_l2tp_users"
-LOCK_FILE="/dev/shm/l2tp_monitor.lock"
 if [ -n "$PEERNAME" ] && [ -n "$IFNAME" ]; then
-    (
-        flock -x 200
-        echo "${PEERNAME}:${IFNAME}" >> "$LOG_FILE"
-    ) 200>"$LOCK_FILE"
+    echo "${PEERNAME}:${IFNAME}" >> "$LOG_FILE"
 fi
 HOOKEOF
 chmod +x $HOOK_UP
@@ -129,25 +118,21 @@ HOOK_DOWN="/etc/ppp/ip-down.d/00-panel-monitor"
 cat > $HOOK_DOWN <<'HOOKEOF'
 #!/bin/bash
 LOG_FILE="/dev/shm/active_l2tp_users"
-LOCK_FILE="/dev/shm/l2tp_monitor.lock"
 if [ -n "$IFNAME" ]; then
-    (
-        flock -x 200
-        # Only remove the line ending with this specific interface name
-        sed -i "/:${IFNAME}$/d" "$LOG_FILE"
-    ) 200>"$LOCK_FILE"
+    sed -i "/:${IFNAME}$/d" "$LOG_FILE"
+fi
+if [ -f "/var/run/$IFNAME.pid" ]; then
+    rm -f "/var/run/$IFNAME.pid"
 fi
 HOOKEOF
 chmod +x $HOOK_DOWN
 
-echo ">>> Restarting Services..."
 systemctl unmask strongswan-starter || true
 systemctl enable strongswan-starter
 systemctl restart strongswan-starter
 systemctl enable xl2tpd
 systemctl restart xl2tpd
 
-echo ">>> Applying Firewall Rules..."
 add_rule() {
     iptables -C "$@" 2>/dev/null || iptables -I "$@"
 }
@@ -165,4 +150,4 @@ iptables -t nat -C POSTROUTING -s $VPN_SUBNET -o $MAIN_IFACE -j MASQUERADE 2>/de
 
 netfilter-persistent save > /dev/null 2>&1 || true
 
-echo "✅ L2TP installed/updated successfully with Fixed Monitoring."
+echo "✅ L2TP installed successfully (Turbo Mode)."
