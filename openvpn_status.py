@@ -14,7 +14,6 @@ import base64
 from datetime import datetime
 import sys
 
-# --- Constants ---
 PORT = 7506
 OPENVPN_CONF_DIR = '/etc/openvpn/server/'
 CCD_DIR = '/etc/openvpn/server/ccd/'
@@ -92,7 +91,6 @@ class StatusHandler(BaseHTTPRequestHandler):
             sessions = []
             detailed_users = {}
 
-            # 1. OpenVPN Users
             for port, data in status_outputs.items():
                 p_info = port_map.get(port, {'proto': 'UDP', 'port': '?'})
                 legacy_key = f"{p_info['port']}/{p_info['proto']}"
@@ -135,7 +133,6 @@ class StatusHandler(BaseHTTPRequestHandler):
                                 detailed_users[uname][legacy_key]["bytes_sent"] += tx
                             except: pass
 
-            # 2. L2TP Users
             try:
                 if os.path.exists(L2TP_ACTIVE_FILE):
                     valid_lines = []
@@ -190,7 +187,6 @@ class StatusHandler(BaseHTTPRequestHandler):
                         except: pass
             except: pass
 
-            # 3. Cisco/Ocserv Users
             try:
                 if os.path.exists(OCCTL_BIN):
                     res = subprocess.run([OCCTL_BIN, '-j', 'show', 'users'], capture_output=True, text=True)
@@ -253,23 +249,24 @@ class StatusHandler(BaseHTTPRequestHandler):
             results = []
             
             for item in commands:
-                # [MODIFIED]: Added try-except block here to isolate failures
                 try:
                     cmd = item.get('command')
                     uname = item.get('username')
                     success, msg = False, "Unknown"
                     
                     if cmd == 'update_l2tp_secrets':
-                        if item.get('content'):
+                        content = item.get('content')
+                        if content is not None:
                             try:
-                                with open('/etc/ppp/chap-secrets', 'w') as f: f.write(item.get('content'))
+                                with open('/etc/ppp/chap-secrets', 'w') as f: f.write(content)
                                 success, msg = True, "Updated"
                             except Exception as e: success, msg = False, str(e)
 
                     elif cmd == 'update_cisco_secrets':
-                        if item.get('content'):
+                        content = item.get('content')
+                        if content is not None:
                             try:
-                                with open('/etc/ocserv/ocpasswd', 'wb') as f: f.write(base64.b64decode(item.get('content')))
+                                with open('/etc/ocserv/ocpasswd', 'wb') as f: f.write(base64.b64decode(content))
                                 success, msg = True, "Updated"
                             except Exception as e: success, msg = False, str(e)
                             
@@ -297,10 +294,9 @@ class StatusHandler(BaseHTTPRequestHandler):
                                         if not line.startswith(f"{uname}:"): f.write(line)
                             except: pass
 
-                        success, msg = True, "Kill Signal Sent (Turbo)"
+                        success, msg = True, "Kill Signal Sent"
 
                     elif cmd == 'enable_user':
-                        # Robust check for CCD
                         try:
                             Path(CCD_DIR).mkdir(parents=True, exist_ok=True)
                             (Path(CCD_DIR)/uname).touch()
@@ -314,7 +310,6 @@ class StatusHandler(BaseHTTPRequestHandler):
                         success, msg = True, "Disabled"
 
                     elif cmd == 'upload_ovpn':
-                        # Error handling specific to upload
                         if item.get('ovpn_content'):
                             try:
                                 p = Path(OVPN_FILES_DIR)/f"{uname}.ovpn"
@@ -334,7 +329,6 @@ class StatusHandler(BaseHTTPRequestHandler):
                     results.append({"username": uname, "success": success, "message": msg})
 
                 except Exception as inner_e:
-                    # Catch-all for any other error to prevent loop crash
                     results.append({"username": item.get('username'), "success": False, "message": f"Critical Error: {str(inner_e)}"})
 
             self.send_response(200)
