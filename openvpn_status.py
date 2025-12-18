@@ -9,9 +9,7 @@ import glob
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import subprocess
-import fcntl
 import base64
-from datetime import datetime
 import sys
 
 PORT = 7506
@@ -20,6 +18,11 @@ CCD_DIR = '/etc/openvpn/server/ccd/'
 OVPN_FILES_DIR = '/root/ovpnfiles/'
 L2TP_ACTIVE_FILE = "/dev/shm/active_l2tp_users"
 OCCTL_BIN = "/usr/bin/occtl"
+CHAP_SECRETS = '/etc/ppp/chap-secrets'
+OCPASSWD = '/etc/ocserv/ocpasswd'
+
+os.makedirs(OVPN_FILES_DIR, exist_ok=True)
+os.makedirs(CCD_DIR, exist_ok=True)
 
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     pass
@@ -91,7 +94,6 @@ class StatusHandler(BaseHTTPRequestHandler):
             sessions = []
             detailed_users = {}
 
-            # --- OpenVPN Parsing ---
             for port, data in status_outputs.items():
                 p_info = port_map.get(port, {'proto': 'UDP', 'port': '?'})
                 legacy_key = f"{p_info['port']}/{p_info['proto']}"
@@ -99,9 +101,9 @@ class StatusHandler(BaseHTTPRequestHandler):
                 for line in data.split('\n'):
                     if line.startswith("CLIENT_LIST"):
                         parts = line.split(',')
-                        if len(parts) >= 7:
+                        if len(parts) >= 11:
                             uname = parts[1].strip()
-                            if uname == 'UNDEF': continue
+                            if uname == 'UNDEF': pass
                             try:
                                 real_ip = parts[2].split(':')[0]
                                 v_ip = parts[3]
@@ -109,10 +111,12 @@ class StatusHandler(BaseHTTPRequestHandler):
                                 tx = int(parts[6])
                                 c_time = time.time()
                                 cid = None
-                                for i, p in enumerate(parts):
+                                for p in parts:
                                     if len(p) == 10 and p.isdigit() and (p.startswith('17') or p.startswith('18')):
                                         c_time = int(p); break
-                                if len(parts) > 0 and parts[-2].isdigit(): cid = int(parts[-2])
+                                
+                                if len(parts) > 10 and parts[10].isdigit(): cid = int(parts[10])
+                                elif len(parts) > 9 and parts[9].isdigit(): cid = int(parts[9])
 
                                 sessions.append({
                                     "username": uname,
@@ -134,21 +138,16 @@ class StatusHandler(BaseHTTPRequestHandler):
                                 detailed_users[uname][legacy_key]["bytes_sent"] += tx
                             except: pass
 
-            # --- L2TP Parsing ---
             try:
                 if os.path.exists(L2TP_ACTIVE_FILE):
                     valid_lines = []
                     file_dirty = False
-                    
-                    with open(L2TP_ACTIVE_FILE, 'r') as f:
-                        lines = f.readlines()
-                    
+                    with open(L2TP_ACTIVE_FILE, 'r') as f: lines = f.readlines()
                     for line in lines:
                         p = line.strip().split(':')
                         if len(p) == 2: 
                             uname = p[0]
                             iface = p[1].strip()
-                            
                             if os.path.exists(f"/sys/class/net/{iface}"):
                                 valid_lines.append(line)
                                 rx, tx = 0, 0
@@ -156,12 +155,10 @@ class StatusHandler(BaseHTTPRequestHandler):
                                     with open(f"/sys/class/net/{iface}/statistics/rx_bytes") as f: rx = int(f.read().strip())
                                     with open(f"/sys/class/net/{iface}/statistics/tx_bytes") as f: tx = int(f.read().strip())
                                 except: pass
-                                
                                 pid = 0
                                 try:
                                     with open(f"/var/run/{iface}.pid") as f: pid = int(f.read().strip())
                                 except: pass
-
                                 sessions.append({
                                     "username": uname,
                                     "protocol": "L2TP",
@@ -172,7 +169,6 @@ class StatusHandler(BaseHTTPRequestHandler):
                                     "connected_at": time.time(),
                                     "session_id": pid
                                 })
-
                                 legacy_key = "L2TP/IPsec"
                                 if uname not in detailed_users: detailed_users[uname] = {}
                                 if legacy_key not in detailed_users[uname]:
@@ -180,16 +176,13 @@ class StatusHandler(BaseHTTPRequestHandler):
                                 detailed_users[uname][legacy_key]["active"] += 1
                                 detailed_users[uname][legacy_key]["bytes_received"] += rx
                                 detailed_users[uname][legacy_key]["bytes_sent"] += tx
-                            else:
-                                file_dirty = True
-                    
+                            else: file_dirty = True
                     if file_dirty:
                         try:
                             with open(L2TP_ACTIVE_FILE, 'w') as f: f.writelines(valid_lines)
                         except: pass
             except: pass
 
-            # --- Cisco Parsing ---
             try:
                 if os.path.exists(OCCTL_BIN):
                     res = subprocess.run([OCCTL_BIN, '-j', 'show', 'users'], capture_output=True, text=True)
@@ -198,7 +191,6 @@ class StatusHandler(BaseHTTPRequestHandler):
                             uname = u.get('Username')
                             if not uname: continue
                             rx, tx = int(u.get('RX', 0)), int(u.get('TX', 0))
-                            
                             sessions.append({
                                 "username": uname,
                                 "protocol": "Cisco",
@@ -209,7 +201,6 @@ class StatusHandler(BaseHTTPRequestHandler):
                                 "connected_at": time.time(),
                                 "session_id": u.get('ID')
                             })
-
                             legacy_key = "Cisco AnyConnect"
                             if uname not in detailed_users: detailed_users[uname] = {}
                             if legacy_key not in detailed_users[uname]:
@@ -227,20 +218,13 @@ class StatusHandler(BaseHTTPRequestHandler):
                     aggregated[u]["bytes_received"] += stats["bytes_received"]
                     aggregated[u]["bytes_sent"] += stats["bytes_sent"]
 
-            response_payload = {
-                "sessions": sessions,
-                "detailed": detailed_users,
-                "aggregated": aggregated
-            }
-            
-            data_json = json.dumps(response_payload)
+            data_json = json.dumps({"sessions": sessions, "detailed": detailed_users, "aggregated": aggregated})
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Content-Length', len(data_json))
             self.end_headers()
             self.wfile.write(data_json.encode('utf-8'))
-
-        except Exception as e: 
+        except Exception as e:
             self.send_error(500, str(e))
 
     def do_POST(self):
@@ -265,27 +249,21 @@ class StatusHandler(BaseHTTPRequestHandler):
                                 subprocess.run([OCCTL_BIN, 'disconnect', 'id', str(session_id)], check=False, stdout=subprocess.DEVNULL)
                                 success, msg = True, f"Cisco ID {session_id} Killed"
                             except Exception as e: success, msg = False, str(e)
-                        
                         elif protocol and 'OpenVPN' in protocol:
                             killed_ovpn = False
                             for port in self._get_all_management_ports():
                                 try:
                                     with socket.create_connection(('127.0.0.1', port), timeout=1) as s:
-                                        s.recv(1024)
-                                        s.sendall(f"client-kill {session_id}\n".encode())
-                                        resp = s.recv(1024).decode()
+                                        s.recv(1024); s.sendall(f"client-kill {session_id}\n".encode()); resp = s.recv(1024).decode()
                                         if "SUCCESS" in resp: killed_ovpn = True
                                 except: pass
-                            
                             if killed_ovpn: success, msg = True, f"OpenVPN CID {session_id} Killed"
                             else: success, msg = False, "OpenVPN CID not found or failed"
-
                         elif protocol and 'L2TP' in protocol:
                             try:
                                 os.kill(int(session_id), 9)
                                 success, msg = True, f"L2TP PID {session_id} Killed"
                             except Exception as e: success, msg = False, str(e)
-                        
                         results.append({"username": uname, "success": success, "message": msg})
                         continue
 
@@ -293,51 +271,39 @@ class StatusHandler(BaseHTTPRequestHandler):
                         content = item.get('content')
                         if content is not None:
                             try:
-                                with open('/etc/ppp/chap-secrets', 'w') as f: f.write(content)
-                                success, msg = True, "Updated"
-                            except Exception as e: success, msg = False, str(e)
+                                os.makedirs(os.path.dirname(CHAP_SECRETS), exist_ok=True)
+                                with open(CHAP_SECRETS, 'w') as f: f.write(content)
+                                success, msg = True, "Updated L2TP Secrets"
+                            except Exception as e: success, msg = False, f"L2TP Error: {str(e)}"
 
                     elif cmd == 'update_cisco_secrets':
                         content = item.get('content')
                         if content is not None:
                             try:
-                                with open('/etc/ocserv/ocpasswd', 'wb') as f: f.write(base64.b64decode(content))
-                                success, msg = True, "Updated"
+                                decoded = base64.b64decode(content)
+                                os.makedirs(os.path.dirname(OCPASSWD), exist_ok=True)
+                                with open(OCPASSWD, 'wb') as f: f.write(decoded)
+                                success, msg = True, "Updated Cisco Secrets"
+                            except Exception as e: success, msg = False, f"Cisco Error: {str(e)}"
+
+                    elif cmd == 'upload_ccd':
+                        content = item.get('content')
+                        if content is not None:
+                            try:
+                                Path(CCD_DIR).mkdir(parents=True, exist_ok=True)
+                                p = Path(CCD_DIR)/uname
+                                p.write_text(content, encoding='utf-8')
+                                success, msg = True, "CCD Uploaded"
                             except Exception as e: success, msg = False, str(e)
-                            
-                    elif cmd == 'kill':
-                        try:
-                            subprocess.run(["pkill", "-9", "-f", f"pppd.*name {uname}"], check=False)
-                        except: pass
-
-                        if os.path.exists(OCCTL_BIN):
-                            try: subprocess.run([OCCTL_BIN, 'disconnect', 'user', uname], check=False, stdout=subprocess.DEVNULL)
-                            except: pass
-
-                        for port in self._get_all_management_ports():
-                            try:
-                                with socket.create_connection(('127.0.0.1', port), timeout=1) as s:
-                                    s.recv(1024); s.sendall(f"kill {uname}\n".encode()); s.recv(1024)
-                            except: pass
-                        
-                        if os.path.exists(L2TP_ACTIVE_FILE):
-                            try:
-                                lines = []
-                                with open(L2TP_ACTIVE_FILE, 'r') as f: lines = f.readlines()
-                                with open(L2TP_ACTIVE_FILE, 'w') as f:
-                                    for line in lines:
-                                        if not line.startswith(f"{uname}:"): f.write(line)
-                            except: pass
-
-                        success, msg = True, "Kill Signal Sent"
 
                     elif cmd == 'enable_user':
                         try:
                             Path(CCD_DIR).mkdir(parents=True, exist_ok=True)
                             (Path(CCD_DIR)/uname).touch()
-                            success, msg = True, "CCD created"
-                        except Exception as e:
-                            success, msg = False, f"CCD Error: {str(e)}"
+                            try: os.chmod(str(Path(CCD_DIR)/uname), 0o644)
+                            except: pass
+                            success, msg = True, "CCD Created"
+                        except Exception as e: success, msg = False, f"CCD Error: {str(e)}"
 
                     elif cmd == 'disable_user':
                         (Path(CCD_DIR)/uname).unlink(missing_ok=True)
@@ -345,26 +311,26 @@ class StatusHandler(BaseHTTPRequestHandler):
                         success, msg = True, "Disabled"
 
                     elif cmd == 'upload_ovpn':
-                        if item.get('ovpn_content'):
+                        content = item.get('ovpn_content') or item.get('content')
+                        if content:
                             try:
                                 p = Path(OVPN_FILES_DIR)/f"{uname}.ovpn"
                                 p.parent.mkdir(parents=True, exist_ok=True)
-                                p.write_text(item.get('ovpn_content'), encoding='utf-8')
-                                success, msg = True, "Uploaded"
-                            except Exception as e:
-                                success, msg = False, f"Upload Error: {str(e)}"
+                                p.write_text(content, encoding='utf-8')
+                                success, msg = True, "Uploaded OVPN"
+                            except Exception as e: success, msg = False, f"Upload Error: {str(e)}"
                     
                     elif cmd == 'delete_user_completely':
                         (Path(CCD_DIR)/uname).unlink(missing_ok=True)
                         (Path(OVPN_FILES_DIR)/f"{uname}.ovpn").unlink(missing_ok=True)
                         if os.path.exists(OCCTL_BIN):
-                            subprocess.run([OCCTL_BIN, 'disconnect', 'user', uname], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            subprocess.run([OCCTL_BIN, 'disconnect', 'user', uname], check=False, stdout=subprocess.DEVNULL)
                         success, msg = True, "Deleted"
 
                     results.append({"username": uname, "success": success, "message": msg})
 
                 except Exception as inner_e:
-                    results.append({"username": item.get('username'), "success": False, "message": f"Critical Error: {str(inner_e)}"})
+                    results.append({"username": item.get('username'), "success": False, "message": f"Critical: {str(inner_e)}"})
 
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
