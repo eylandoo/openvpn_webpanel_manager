@@ -252,8 +252,40 @@ class StatusHandler(BaseHTTPRequestHandler):
                 try:
                     cmd = item.get('command')
                     uname = item.get('username')
+                    session_id = item.get('session_id')
+                    protocol = item.get('protocol')
                     success, msg = False, "Unknown"
                     
+                    if cmd == 'kill_id' and session_id:
+                        if protocol and 'Cisco' in protocol and os.path.exists(OCCTL_BIN):
+                            try:
+                                subprocess.run([OCCTL_BIN, 'disconnect', 'id', str(session_id)], check=False, stdout=subprocess.DEVNULL)
+                                success, msg = True, f"Cisco ID {session_id} Killed"
+                            except Exception as e: success, msg = False, str(e)
+                        
+                        elif protocol and 'OpenVPN' in protocol:
+                            killed_ovpn = False
+                            for port in self._get_all_management_ports():
+                                try:
+                                    with socket.create_connection(('127.0.0.1', port), timeout=1) as s:
+                                        s.recv(1024)
+                                        s.sendall(f"client-kill {session_id}\n".encode())
+                                        resp = s.recv(1024).decode()
+                                        if "SUCCESS" in resp: killed_ovpn = True
+                                except: pass
+                            
+                            if killed_ovpn: success, msg = True, f"OpenVPN CID {session_id} Killed"
+                            else: success, msg = False, "OpenVPN CID not found or failed"
+
+                        elif protocol and 'L2TP' in protocol:
+                            try:
+                                os.kill(int(session_id), 9)
+                                success, msg = True, f"L2TP PID {session_id} Killed"
+                            except Exception as e: success, msg = False, str(e)
+                        
+                        results.append({"username": uname, "success": success, "message": msg})
+                        continue
+
                     if cmd == 'update_l2tp_secrets':
                         content = item.get('content')
                         if content is not None:
