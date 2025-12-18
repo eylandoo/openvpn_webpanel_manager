@@ -14,6 +14,7 @@ import base64
 from datetime import datetime
 import sys
 
+# --- Constants ---
 PORT = 7506
 OPENVPN_CONF_DIR = '/etc/openvpn/server/'
 CCD_DIR = '/etc/openvpn/server/ccd/'
@@ -91,6 +92,7 @@ class StatusHandler(BaseHTTPRequestHandler):
             sessions = []
             detailed_users = {}
 
+            # 1. OpenVPN Users
             for port, data in status_outputs.items():
                 p_info = port_map.get(port, {'proto': 'UDP', 'port': '?'})
                 legacy_key = f"{p_info['port']}/{p_info['proto']}"
@@ -133,6 +135,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                                 detailed_users[uname][legacy_key]["bytes_sent"] += tx
                             except: pass
 
+            # 2. L2TP Users
             try:
                 if os.path.exists(L2TP_ACTIVE_FILE):
                     valid_lines = []
@@ -187,6 +190,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                         except: pass
             except: pass
 
+            # 3. Cisco/Ocserv Users
             try:
                 if os.path.exists(OCCTL_BIN):
                     res = subprocess.run([OCCTL_BIN, '-j', 'show', 'users'], capture_output=True, text=True)
@@ -249,73 +253,89 @@ class StatusHandler(BaseHTTPRequestHandler):
             results = []
             
             for item in commands:
-                cmd = item.get('command')
-                uname = item.get('username')
-                success, msg = False, "Unknown"
-                
-                if cmd == 'update_l2tp_secrets':
-                    if item.get('content'):
-                        try:
-                            with open('/etc/ppp/chap-secrets', 'w') as f: f.write(item.get('content'))
-                            success, msg = True, "Updated"
-                        except Exception as e: success, msg = False, str(e)
-                elif cmd == 'update_cisco_secrets':
-                    if item.get('content'):
-                        try:
-                            with open('/etc/ocserv/ocpasswd', 'wb') as f: f.write(base64.b64decode(item.get('content')))
-                            success, msg = True, "Updated"
-                        except Exception as e: success, msg = False, str(e)
-                        
-                elif cmd == 'kill':
-                    try:
-                        
-                        subprocess.run(["pkill", "-9", "-f", f"pppd.*name {uname}"], check=False)
-                    except: pass
-
-                    if os.path.exists(OCCTL_BIN):
-                        try: subprocess.run([OCCTL_BIN, 'disconnect', 'user', uname], check=False, stdout=subprocess.DEVNULL)
-                        except: pass
-
-                    for port in self._get_all_management_ports():
-                        try:
-                            with socket.create_connection(('127.0.0.1', port), timeout=1) as s:
-                                s.recv(1024); s.sendall(f"kill {uname}\n".encode()); s.recv(1024)
-                        except: pass
+                # [MODIFIED]: Added try-except block here to isolate failures
+                try:
+                    cmd = item.get('command')
+                    uname = item.get('username')
+                    success, msg = False, "Unknown"
                     
-                    # پاکسازی فایل لاگ برای اطمینان
-                    if os.path.exists(L2TP_ACTIVE_FILE):
+                    if cmd == 'update_l2tp_secrets':
+                        if item.get('content'):
+                            try:
+                                with open('/etc/ppp/chap-secrets', 'w') as f: f.write(item.get('content'))
+                                success, msg = True, "Updated"
+                            except Exception as e: success, msg = False, str(e)
+
+                    elif cmd == 'update_cisco_secrets':
+                        if item.get('content'):
+                            try:
+                                with open('/etc/ocserv/ocpasswd', 'wb') as f: f.write(base64.b64decode(item.get('content')))
+                                success, msg = True, "Updated"
+                            except Exception as e: success, msg = False, str(e)
+                            
+                    elif cmd == 'kill':
                         try:
-                            lines = []
-                            with open(L2TP_ACTIVE_FILE, 'r') as f: lines = f.readlines()
-                            with open(L2TP_ACTIVE_FILE, 'w') as f:
-                                for line in lines:
-                                    if not line.startswith(f"{uname}:"): f.write(line)
+                            subprocess.run(["pkill", "-9", "-f", f"pppd.*name {uname}"], check=False)
                         except: pass
 
-                    success, msg = True, "Kill Signal Sent (Turbo)"
+                        if os.path.exists(OCCTL_BIN):
+                            try: subprocess.run([OCCTL_BIN, 'disconnect', 'user', uname], check=False, stdout=subprocess.DEVNULL)
+                            except: pass
 
-                elif cmd == 'enable_user':
-                    Path(CCD_DIR).mkdir(parents=True, exist_ok=True)
-                    (Path(CCD_DIR)/uname).touch()
-                    success, msg = True, "CCD created"
-                elif cmd == 'disable_user':
-                    (Path(CCD_DIR)/uname).unlink(missing_ok=True)
-                    (Path(OVPN_FILES_DIR)/f"{uname}.ovpn").unlink(missing_ok=True)
-                    success, msg = True, "Disabled"
-                elif cmd == 'upload_ovpn':
-                    if item.get('ovpn_content'):
-                        p = Path(OVPN_FILES_DIR)/f"{uname}.ovpn"
-                        p.parent.mkdir(parents=True, exist_ok=True)
-                        p.write_text(item.get('ovpn_content'), encoding='utf-8')
-                        success, msg = True, "Uploaded"
-                elif cmd == 'delete_user_completely':
-                    (Path(CCD_DIR)/uname).unlink(missing_ok=True)
-                    (Path(OVPN_FILES_DIR)/f"{uname}.ovpn").unlink(missing_ok=True)
-                    if os.path.exists(OCCTL_BIN):
-                        subprocess.run([OCCTL_BIN, 'disconnect', 'user', uname], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    success, msg = True, "Deleted"
+                        for port in self._get_all_management_ports():
+                            try:
+                                with socket.create_connection(('127.0.0.1', port), timeout=1) as s:
+                                    s.recv(1024); s.sendall(f"kill {uname}\n".encode()); s.recv(1024)
+                            except: pass
+                        
+                        if os.path.exists(L2TP_ACTIVE_FILE):
+                            try:
+                                lines = []
+                                with open(L2TP_ACTIVE_FILE, 'r') as f: lines = f.readlines()
+                                with open(L2TP_ACTIVE_FILE, 'w') as f:
+                                    for line in lines:
+                                        if not line.startswith(f"{uname}:"): f.write(line)
+                            except: pass
 
-                results.append({"username": uname, "success": success, "message": msg})
+                        success, msg = True, "Kill Signal Sent (Turbo)"
+
+                    elif cmd == 'enable_user':
+                        # Robust check for CCD
+                        try:
+                            Path(CCD_DIR).mkdir(parents=True, exist_ok=True)
+                            (Path(CCD_DIR)/uname).touch()
+                            success, msg = True, "CCD created"
+                        except Exception as e:
+                            success, msg = False, f"CCD Error: {str(e)}"
+
+                    elif cmd == 'disable_user':
+                        (Path(CCD_DIR)/uname).unlink(missing_ok=True)
+                        (Path(OVPN_FILES_DIR)/f"{uname}.ovpn").unlink(missing_ok=True)
+                        success, msg = True, "Disabled"
+
+                    elif cmd == 'upload_ovpn':
+                        # Error handling specific to upload
+                        if item.get('ovpn_content'):
+                            try:
+                                p = Path(OVPN_FILES_DIR)/f"{uname}.ovpn"
+                                p.parent.mkdir(parents=True, exist_ok=True)
+                                p.write_text(item.get('ovpn_content'), encoding='utf-8')
+                                success, msg = True, "Uploaded"
+                            except Exception as e:
+                                success, msg = False, f"Upload Error: {str(e)}"
+                    
+                    elif cmd == 'delete_user_completely':
+                        (Path(CCD_DIR)/uname).unlink(missing_ok=True)
+                        (Path(OVPN_FILES_DIR)/f"{uname}.ovpn").unlink(missing_ok=True)
+                        if os.path.exists(OCCTL_BIN):
+                            subprocess.run([OCCTL_BIN, 'disconnect', 'user', uname], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        success, msg = True, "Deleted"
+
+                    results.append({"username": uname, "success": success, "message": msg})
+
+                except Exception as inner_e:
+                    # Catch-all for any other error to prevent loop crash
+                    results.append({"username": item.get('username'), "success": False, "message": f"Critical Error: {str(inner_e)}"})
 
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
