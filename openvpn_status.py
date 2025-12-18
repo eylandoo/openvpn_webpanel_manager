@@ -91,6 +91,7 @@ class StatusHandler(BaseHTTPRequestHandler):
             sessions = []
             detailed_users = {}
 
+            # --- OpenVPN Parsing ---
             for port, data in status_outputs.items():
                 p_info = port_map.get(port, {'proto': 'UDP', 'port': '?'})
                 legacy_key = f"{p_info['port']}/{p_info['proto']}"
@@ -133,6 +134,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                                 detailed_users[uname][legacy_key]["bytes_sent"] += tx
                             except: pass
 
+            # --- L2TP Parsing ---
             try:
                 if os.path.exists(L2TP_ACTIVE_FILE):
                     valid_lines = []
@@ -187,6 +189,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                         except: pass
             except: pass
 
+            # --- Cisco Parsing ---
             try:
                 if os.path.exists(OCCTL_BIN):
                     res = subprocess.run([OCCTL_BIN, '-j', 'show', 'users'], capture_output=True, text=True)
