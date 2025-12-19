@@ -1,5 +1,7 @@
 #!/bin/bash
 
+echo "--- Starting Surgical L2TP Fix ---"
+
 if [ -f /etc/ipsec.conf ]; then cp /etc/ipsec.conf /etc/ipsec.conf.bak.$(date +%s); fi
 cat > /etc/ipsec.conf <<EOF
 config setup
@@ -105,4 +107,4 @@ chmod +x $HOOK_DOWN
 systemctl restart strongswan-starter
 systemctl restart xl2tpd
 
-echo "Configuration Fixed."
+echo "--- Fix Done! Secret and Users were NOT touched. ---"
