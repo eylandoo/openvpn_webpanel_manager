@@ -2,6 +2,7 @@
 
 echo "--- Starting Surgical L2TP Fix ---"
 
+echo "1. Fixing IPsec Config for Windows/Modems..."
 if [ -f /etc/ipsec.conf ]; then cp /etc/ipsec.conf /etc/ipsec.conf.bak.$(date +%s); fi
 cat > /etc/ipsec.conf <<EOF
 config setup
@@ -31,7 +32,10 @@ conn L2TP-PSK
     rightprotoport=17/%any
 EOF
 
-if [ -f /etc/xl2tpd/xl2tpd.conf ]; then cp /etc/xl2tpd/xl2tpd.conf /etc/xl2tpd/xl2tpd.conf.bak.$(date +%s); fi
+echo "2. Fixing xl2tpd & PPP settings..."
+# Force create directory if missing
+mkdir -p /etc/xl2tpd
+
 cat > /etc/xl2tpd/xl2tpd.conf <<EOF
 [global]
 port = 1701
@@ -48,6 +52,9 @@ ppp debug = yes
 pppoptfile = /etc/ppp/options.xl2tpd
 length bit = yes
 EOF
+
+# Force create directory if missing
+mkdir -p /etc/ppp
 
 cat > /etc/ppp/options.xl2tpd <<EOF
 ipcp-accept-local
@@ -69,6 +76,12 @@ refuse-chap
 refuse-mschap
 require-mschap-v2
 EOF
+
+echo "3. Fixing Agent Hooks (PID Cleanup)..."
+
+# Create directories for hooks if missing
+mkdir -p /etc/ppp/ip-up.d
+mkdir -p /etc/ppp/ip-down.d
 
 if [ ! -f /etc/ppp/ip-up ]; then
     echo '#!/bin/bash' > /etc/ppp/ip-up
@@ -104,7 +117,16 @@ fi
 HOOKEOF
 chmod +x $HOOK_DOWN
 
+echo "4. Restarting Services..."
+# Try to install if missing (Just in case)
+if ! command -v xl2tpd &> /dev/null; then
+    echo "xl2tpd not found! Installing packages..."
+    apt-get update -qq && apt-get install -y strongswan xl2tpd ppp net-tools
+fi
+
+systemctl unmask strongswan-starter > /dev/null 2>&1 || true
 systemctl restart strongswan-starter
+systemctl unmask xl2tpd > /dev/null 2>&1 || true
 systemctl restart xl2tpd
 
 echo "--- Fix Done! Secret and Users were NOT touched. ---"
