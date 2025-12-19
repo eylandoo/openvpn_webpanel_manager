@@ -8,12 +8,29 @@ VPN_SUBNET="192.168.42.0/24"
 
 export DEBIAN_FRONTEND=noninteractive
 
+echo ">>> Updating and installing packages..."
 apt-get update
 apt-get install -y strongswan xl2tpd ppp net-tools iptables-persistent
 
+echo ">>> Enabling IP Forwarding..."
 sed -i 's/#net.ipv4.ip_forward=1/net.ipv4.ip_forward=1/' /etc/sysctl.conf
 sysctl -w net.ipv4.ip_forward=1 > /dev/null 2>&1
 sysctl -p > /dev/null 2>&1 || true
+
+
+echo ">>> Fixing strongswan.conf..."
+if [ ! -f /etc/strongswan.conf ]; then
+cat > /etc/strongswan.conf <<EOF
+charon {
+    load_modular = yes
+    plugins {
+        include strongswan.d/charon/*.conf
+    }
+}
+include strongswan.d/*.conf
+EOF
+fi
+
 
 if [ -f /etc/ipsec.conf ]; then mv /etc/ipsec.conf /etc/ipsec.conf.bak.$(date +%s); fi
 cat > /etc/ipsec.conf <<EOF
@@ -26,8 +43,8 @@ conn %default
     keyingtries=%forever
     ike=aes256-sha1-modp1024,3des-sha1-modp1024!
     esp=aes256-sha1,3des-sha1!
-    dpddelay=5
-    dpdtimeout=10
+    dpddelay=30
+    dpdtimeout=120
     dpdaction=clear
 conn L2TP-PSK-NAT
     rightsubnet=vhost:%priv
@@ -83,13 +100,14 @@ hide-password
 modem
 name l2tpd
 proxyarp
-lcp-echo-interval 1
-lcp-echo-failure 3
+lcp-echo-interval 30
+lcp-echo-failure 4
 EOF
 
 touch /etc/ppp/chap-secrets
 chmod 600 /etc/ppp/chap-secrets
 
+echo ">>> Setting up Monitoring Hooks (Safe Mode)..."
 mkdir -p /etc/ppp/ip-up.d
 mkdir -p /etc/ppp/ip-down.d
 
@@ -108,8 +126,12 @@ HOOK_UP="/etc/ppp/ip-up.d/00-panel-monitor"
 cat > $HOOK_UP <<'HOOKEOF'
 #!/bin/bash
 LOG_FILE="/dev/shm/active_l2tp_users"
+LOCK_FILE="/dev/shm/l2tp_monitor.lock"
 if [ -n "$PEERNAME" ] && [ -n "$IFNAME" ]; then
-    echo "${PEERNAME}:${IFNAME}" >> "$LOG_FILE"
+    (
+        flock -x 200
+        echo "${PEERNAME}:${IFNAME}" >> "$LOG_FILE"
+    ) 200>"$LOCK_FILE"
 fi
 HOOKEOF
 chmod +x $HOOK_UP
@@ -118,8 +140,12 @@ HOOK_DOWN="/etc/ppp/ip-down.d/00-panel-monitor"
 cat > $HOOK_DOWN <<'HOOKEOF'
 #!/bin/bash
 LOG_FILE="/dev/shm/active_l2tp_users"
+LOCK_FILE="/dev/shm/l2tp_monitor.lock"
 if [ -n "$IFNAME" ]; then
-    sed -i "/:${IFNAME}$/d" "$LOG_FILE"
+    (
+        flock -x 200
+        sed -i "/:${IFNAME}$/d" "$LOG_FILE"
+    ) 200>"$LOCK_FILE"
 fi
 if [ -f "/var/run/$IFNAME.pid" ]; then
     rm -f "/var/run/$IFNAME.pid"
@@ -146,8 +172,9 @@ add_rule INPUT -p udp --dport 1701 -j ACCEPT
 add_rule FORWARD -i ppp+ -o $MAIN_IFACE -j ACCEPT
 add_rule FORWARD -i $MAIN_IFACE -o ppp+ -j ACCEPT
 
+# TYPO FIXED HERE: PO STROUTING -> POSTROUTING
 iptables -t nat -C POSTROUTING -s $VPN_SUBNET -o $MAIN_IFACE -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING -s $VPN_SUBNET -o $MAIN_IFACE -j MASQUERADE
 
 netfilter-persistent save > /dev/null 2>&1 || true
 
-echo "✅ L2TP installed successfully (Turbo Mode)."
+echo "✅ L2TP installed successfully (Safe & Stable)."
