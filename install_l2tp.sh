@@ -8,25 +8,16 @@ VPN_SUBNET="192.168.42.0/24"
 
 export DEBIAN_FRONTEND=noninteractive
 
+echo ">>> Updating and installing packages..."
 apt-get update
 apt-get install -y strongswan xl2tpd ppp net-tools iptables-persistent
 
+echo ">>> Enabling IP Forwarding..."
 sed -i 's/#net.ipv4.ip_forward=1/net.ipv4.ip_forward=1/' /etc/sysctl.conf
 sysctl -w net.ipv4.ip_forward=1 > /dev/null 2>&1
 sysctl -p > /dev/null 2>&1 || true
 
-if [ ! -f /etc/strongswan.conf ]; then
-cat > /etc/strongswan.conf <<EOF
-charon {
-    load_modular = yes
-    plugins {
-        include strongswan.d/charon/*.conf
-    }
-}
-include strongswan.d/*.conf
-EOF
-fi
-
+echo ">>> Configuring IPsec..."
 if [ -f /etc/ipsec.conf ]; then mv /etc/ipsec.conf /etc/ipsec.conf.bak.$(date +%s); fi
 cat > /etc/ipsec.conf <<EOF
 config setup
@@ -65,17 +56,16 @@ cat > /etc/ipsec.secrets <<EOF
 EOF
 chmod 600 /etc/ipsec.secrets
 
+echo ">>> Configuring xl2tpd..."
 if [ -f /etc/xl2tpd/xl2tpd.conf ]; then mv /etc/xl2tpd/xl2tpd.conf /etc/xl2tpd/xl2tpd.conf.bak.$(date +%s); fi
 cat > /etc/xl2tpd/xl2tpd.conf <<EOF
 [global]
 ipsec saref = yes
 listen-addr = 0.0.0.0
-port = 1701
-
 [lns default]
 ip range = $VPN_IP_RANGE
 local ip = $VPN_LOCAL_IP
-require chap = no
+require chap = yes
 refuse pap = yes
 require authentication = yes
 name = l2tpd
@@ -84,21 +74,19 @@ pppoptfile = /etc/ppp/options.xl2tpd
 length bit = yes
 EOF
 
+echo ">>> Configuring PPP options..."
 if [ -f /etc/ppp/options.xl2tpd ]; then mv /etc/ppp/options.xl2tpd /etc/ppp/options.xl2tpd.bak.$(date +%s); fi
 cat > /etc/ppp/options.xl2tpd <<EOF
 require-mschap-v2
-refuse-mschap
-refuse-chap
-refuse-pap
 ms-dns 8.8.8.8
 ms-dns 1.1.1.1
 auth
-mtu 1400
-mru 1400
+mtu 1200
+mru 1000
 crtscts
 hide-password
 modem
-name = l2tpd
+name l2tpd
 proxyarp
 lcp-echo-interval 30
 lcp-echo-failure 4
@@ -107,26 +95,20 @@ EOF
 touch /etc/ppp/chap-secrets
 chmod 600 /etc/ppp/chap-secrets
 
+echo ">>> Setting up Monitoring Hooks..."
 mkdir -p /etc/ppp/ip-up.d
 mkdir -p /etc/ppp/ip-down.d
-
-if [ ! -f /etc/ppp/ip-up ]; then
-    echo '#!/bin/bash' > /etc/ppp/ip-up
-    echo '/bin/run-parts /etc/ppp/ip-up.d' >> /etc/ppp/ip-up
-    chmod +x /etc/ppp/ip-up
-fi
-if [ ! -f /etc/ppp/ip-down ]; then
-    echo '#!/bin/bash' > /etc/ppp/ip-down
-    echo '/bin/run-parts /etc/ppp/ip-down.d' >> /etc/ppp/ip-down
-    chmod +x /etc/ppp/ip-down
-fi
 
 HOOK_UP="/etc/ppp/ip-up.d/00-panel-monitor"
 cat > $HOOK_UP <<'HOOKEOF'
 #!/bin/bash
 LOG_FILE="/dev/shm/active_l2tp_users"
+LOCK_FILE="/dev/shm/l2tp_monitor.lock"
 if [ -n "$PEERNAME" ] && [ -n "$IFNAME" ]; then
-    echo "${PEERNAME}:${IFNAME}" >> "$LOG_FILE"
+    (
+        flock -x 200
+        echo "${PEERNAME}:${IFNAME}" >> "$LOG_FILE"
+    ) 200>"$LOCK_FILE"
 fi
 HOOKEOF
 chmod +x $HOOK_UP
@@ -135,36 +117,42 @@ HOOK_DOWN="/etc/ppp/ip-down.d/00-panel-monitor"
 cat > $HOOK_DOWN <<'HOOKEOF'
 #!/bin/bash
 LOG_FILE="/dev/shm/active_l2tp_users"
-if [ -n "$IFNAME" ]; then
-    sed -i "/:${IFNAME}$/d" "$LOG_FILE"
-fi
-if [ -f "/var/run/$IFNAME.pid" ]; then
-    rm -f "/var/run/$IFNAME.pid"
+LOCK_FILE="/dev/shm/l2tp_monitor.lock"
+if [ -n "$PEERNAME" ]; then
+    (
+        flock -x 200
+        sed -i "/^${PEERNAME}:/d" "$LOG_FILE"
+    ) 200>"$LOCK_FILE"
 fi
 HOOKEOF
 chmod +x $HOOK_DOWN
 
+echo ">>> Restarting Services..."
 systemctl unmask strongswan-starter || true
 systemctl enable strongswan-starter
 systemctl restart strongswan-starter
 systemctl enable xl2tpd
 systemctl restart xl2tpd
 
+echo ">>> Applying Firewall Rules..."
 add_rule() {
     iptables -C "$@" 2>/dev/null || iptables -I "$@"
 }
 
-MAIN_IFACE=$(ip route get 8.8.8.8 | awk '{print $5; exit}')
+MAIN_IFACE=$(ip route get 1.1.1.1 | awk '{print $5; exit}')
 
+# Input Rules
 add_rule INPUT -p udp --dport 500 -j ACCEPT
 add_rule INPUT -p udp --dport 4500 -j ACCEPT
 add_rule INPUT -p udp --dport 1701 -j ACCEPT
 
+# Forwarding Rules
 add_rule FORWARD -i ppp+ -o $MAIN_IFACE -j ACCEPT
 add_rule FORWARD -i $MAIN_IFACE -o ppp+ -j ACCEPT
 
+# NAT Rule
 iptables -t nat -C POSTROUTING -s $VPN_SUBNET -o $MAIN_IFACE -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING -s $VPN_SUBNET -o $MAIN_IFACE -j MASQUERADE
 
 netfilter-persistent save > /dev/null 2>&1 || true
 
-echo "INSTALLED"
+echo "✅ L2TP installed/updated successfully. Interface: $MAIN_IFACE"
