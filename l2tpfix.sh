@@ -1,102 +1,49 @@
-#!/bin/bash
-
-echo "--- Starting Windows Compatibility Fix ---"
-
-if [ -f /etc/ipsec.conf ]; then cp /etc/ipsec.conf /etc/ipsec.conf.bak.$(date +%s); fi
-cat > /etc/ipsec.conf <<EOF
-config setup
-    charondebug="ike 1, knl 1, cfg 0"
-    uniqueids=no
-
-conn %default
-    keyingtries=%forever
-    dpddelay=30
-    dpdtimeout=120
-    dpdaction=clear
-
-conn L2TP-PSK
-    keyexchange=ikev1
-    authby=secret
-    ike=aes256-sha256-modp2048,aes256-sha1-modp1024,3des-sha1-modp1024!
-    esp=aes256-sha256,aes256-sha1,3des-sha1!
-    pfs=no
-    auto=add
-    rekey=no
-    ikelifetime=8h
-    keylife=1h
-    type=transport
-    left=%any
-    leftprotoport=17/1701
-    right=%any
-    rightprotoport=17/%any
-EOF
-
-mkdir -p /etc/xl2tpd
-cat > /etc/xl2tpd/xl2tpd.conf <<EOF
-[global]
-port = 1701
-access control = no
-
-[lns default]
-ip range = 192.168.42.10-192.168.42.250
-local ip = 192.168.42.1
-require chap = yes
-refuse pap = yes
-require authentication = yes
-name = l2tpd
-ppp debug = yes
-pppoptfile = /etc/ppp/options.xl2tpd
-length bit = yes
-EOF
-
-mkdir -p /etc/ppp
+(
 cat > /etc/ppp/options.xl2tpd <<EOF
-ipcp-accept-local
-ipcp-accept-remote
-ms-dns 8.8.8.8
-ms-dns 8.8.4.4
-noccp
-auth
-mtu 1280
-mru 1280
-nodefaultroute
-debug
-lock
-proxyarp
-connect-delay 5000
-refuse-pap
-refuse-eap
-refuse-chap
-refuse-mschap
 require-mschap-v2
+ms-dns 8.8.8.8
+ms-dns 1.1.1.1
+auth
+mtu 1200
+mru 1000
+crtscts
+hide-password
+modem
+name l2tpd
+proxyarp
+lcp-echo-interval 1
+lcp-echo-failure 3
 EOF
 
-mkdir -p /etc/ppp/ip-up.d
-mkdir -p /etc/ppp/ip-down.d
+if [ -f /etc/ipsec.conf ]; then
+    sed -i 's/dpddelay=.*/dpddelay=5/' /etc/ipsec.conf
+    sed -i 's/dpdtimeout=.*/dpdtimeout=10/' /etc/ipsec.conf
+fi
 
-if [ ! -f /etc/ppp/ip-up ]; then
+mkdir -p /etc/ppp/ip-up.d /etc/ppp/ip-down.d
+
+if [ ! -f /etc/ppp/ip-up ] || ! grep -q "run-parts" /etc/ppp/ip-up; then
     echo '#!/bin/bash' > /etc/ppp/ip-up
     echo '/bin/run-parts /etc/ppp/ip-up.d' >> /etc/ppp/ip-up
     chmod +x /etc/ppp/ip-up
 fi
-if [ ! -f /etc/ppp/ip-down ]; then
+
+if [ ! -f /etc/ppp/ip-down ] || ! grep -q "run-parts" /etc/ppp/ip-down; then
     echo '#!/bin/bash' > /etc/ppp/ip-down
     echo '/bin/run-parts /etc/ppp/ip-down.d' >> /etc/ppp/ip-down
     chmod +x /etc/ppp/ip-down
 fi
 
-HOOK_UP="/etc/ppp/ip-up.d/00-panel-monitor"
-cat > $HOOK_UP <<'HOOKEOF'
+cat > /etc/ppp/ip-up.d/00-panel-monitor <<'EOF'
 #!/bin/bash
 LOG_FILE="/dev/shm/active_l2tp_users"
 if [ -n "$PEERNAME" ] && [ -n "$IFNAME" ]; then
     echo "${PEERNAME}:${IFNAME}" >> "$LOG_FILE"
 fi
-HOOKEOF
-chmod +x $HOOK_UP
+EOF
+chmod +x /etc/ppp/ip-up.d/00-panel-monitor
 
-HOOK_DOWN="/etc/ppp/ip-down.d/00-panel-monitor"
-cat > $HOOK_DOWN <<'HOOKEOF'
+cat > /etc/ppp/ip-down.d/00-panel-monitor <<'EOF'
 #!/bin/bash
 LOG_FILE="/dev/shm/active_l2tp_users"
 if [ -n "$IFNAME" ]; then
@@ -105,16 +52,14 @@ fi
 if [ -f "/var/run/$IFNAME.pid" ]; then
     rm -f "/var/run/$IFNAME.pid"
 fi
-HOOKEOF
-chmod +x $HOOK_DOWN
+EOF
+chmod +x /etc/ppp/ip-down.d/00-panel-monitor
 
-if ! command -v xl2tpd &> /dev/null; then
-    apt-get update -qq && apt-get install -y strongswan xl2tpd ppp net-tools
-fi
+rm -f /dev/shm/active_l2tp_users
+touch /dev/shm/active_l2tp_users
+chmod 666 /dev/shm/active_l2tp_users
 
-systemctl unmask strongswan-starter > /dev/null 2>&1 || true
 systemctl restart strongswan-starter
-systemctl unmask xl2tpd > /dev/null 2>&1 || true
 systemctl restart xl2tpd
-
-echo "--- Windows Compatibility Fix Applied ---"
+echo "✅ L2TP Ultimate Turbo Fix Applied!"
+)
