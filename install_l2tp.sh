@@ -15,6 +15,18 @@ sed -i 's/#net.ipv4.ip_forward=1/net.ipv4.ip_forward=1/' /etc/sysctl.conf
 sysctl -w net.ipv4.ip_forward=1 > /dev/null 2>&1
 sysctl -p > /dev/null 2>&1 || true
 
+if [ ! -f /etc/strongswan.conf ]; then
+cat > /etc/strongswan.conf <<EOF
+charon {
+    load_modular = yes
+    plugins {
+        include strongswan.d/charon/*.conf
+    }
+}
+include strongswan.d/*.conf
+EOF
+fi
+
 if [ -f /etc/ipsec.conf ]; then mv /etc/ipsec.conf /etc/ipsec.conf.bak.$(date +%s); fi
 cat > /etc/ipsec.conf <<EOF
 config setup
@@ -26,8 +38,8 @@ conn %default
     keyingtries=%forever
     ike=aes256-sha1-modp1024,3des-sha1-modp1024!
     esp=aes256-sha1,3des-sha1!
-    dpddelay=5
-    dpdtimeout=10
+    dpddelay=30
+    dpdtimeout=120
     dpdaction=clear
 conn L2TP-PSK-NAT
     rightsubnet=vhost:%priv
@@ -58,10 +70,12 @@ cat > /etc/xl2tpd/xl2tpd.conf <<EOF
 [global]
 ipsec saref = yes
 listen-addr = 0.0.0.0
+port = 1701
+
 [lns default]
 ip range = $VPN_IP_RANGE
 local ip = $VPN_LOCAL_IP
-require chap = yes
+require chap = no
 refuse pap = yes
 require authentication = yes
 name = l2tpd
@@ -73,18 +87,21 @@ EOF
 if [ -f /etc/ppp/options.xl2tpd ]; then mv /etc/ppp/options.xl2tpd /etc/ppp/options.xl2tpd.bak.$(date +%s); fi
 cat > /etc/ppp/options.xl2tpd <<EOF
 require-mschap-v2
+refuse-mschap
+refuse-chap
+refuse-pap
 ms-dns 8.8.8.8
 ms-dns 1.1.1.1
 auth
-mtu 1200
-mru 1000
+mtu 1400
+mru 1400
 crtscts
 hide-password
 modem
-name l2tpd
+name = l2tpd
 proxyarp
-lcp-echo-interval 1
-lcp-echo-failure 3
+lcp-echo-interval 30
+lcp-echo-failure 4
 EOF
 
 touch /etc/ppp/chap-secrets
@@ -137,7 +154,7 @@ add_rule() {
     iptables -C "$@" 2>/dev/null || iptables -I "$@"
 }
 
-MAIN_IFACE=$(ip route get 1.1.1.1 | awk '{print $5; exit}')
+MAIN_IFACE=$(ip route get 8.8.8.8 | awk '{print $5; exit}')
 
 add_rule INPUT -p udp --dport 500 -j ACCEPT
 add_rule INPUT -p udp --dport 4500 -j ACCEPT
@@ -150,4 +167,4 @@ iptables -t nat -C POSTROUTING -s $VPN_SUBNET -o $MAIN_IFACE -j MASQUERADE 2>/de
 
 netfilter-persistent save > /dev/null 2>&1 || true
 
-echo "✅ L2TP installed successfully (Turbo Mode)."
+echo "INSTALLED"
