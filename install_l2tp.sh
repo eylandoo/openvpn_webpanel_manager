@@ -151,4 +151,4 @@ systemctl enable xl2tpd
 systemctl restart xl2tpd
 
 echo "L2TP Installation Completed Successfully."
-echo "PSK (Secret): $IPSEC_PSK"
+echo "PSK: $IPSEC_PSK"
