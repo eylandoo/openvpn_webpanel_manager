@@ -100,8 +100,8 @@ hide-password
 modem
 name l2tpd
 proxyarp
-lcp-echo-interval 30
-lcp-echo-failure 4
+lcp-echo-interval 1
+lcp-echo-failure 3
 EOF
 
 touch /etc/ppp/chap-secrets
