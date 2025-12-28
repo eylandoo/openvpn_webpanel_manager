@@ -17,6 +17,10 @@ if [[ "$1" == "panel" && "$2" == "restart" ]]; then
 elif [[ "$1" == "openvpn" && "$2" == "restart" ]]; then
     systemctl restart openvpn-server@server && echo -e "\033[1;32m[✔] OpenVPN Core restarted.\033[0m" || echo -e "\033[1;31m[✘] Failed to restart OpenVPN Core.\033[0m"
     exit 0
+elif [[ "$1" == "wireguard" && "$2" == "restart" ]]; then
+    systemctl restart wg-quick@wg1 && echo -e "\033[1;32m[✔] WireGuard (wg1) restarted.\033[0m" || echo -e "\033[1;31m[✘] Failed to restart WireGuard (wg1).\033[0m"
+    exit 0
+
 fi
 
 if [ ! -f /usr/local/bin/vpn_manager ]; then
@@ -105,6 +109,72 @@ uninstall_l2tp() {
     echo -e "${GREEN}[✔] L2TP/IPsec has been uninstalled successfully!${RESET}"
 }
 
+uninstall_wireguard() {
+    echo -e "${YELLOW}[+] Uninstalling WireGuard...${RESET}"
+
+    WG_PORTS=()
+    if [[ -f /etc/wireguard/wg1.conf ]]; then
+        p=$(grep -E '^\s*ListenPort\s*=' /etc/wireguard/wg1.conf | head -n1 | awk -F= '{gsub(/[[:space:]]/,"",$2); print $2}')
+        [[ -n "$p" ]] && WG_PORTS+=("$p")
+    fi
+    if [[ -f /etc/wireguard/wg0.conf ]]; then
+        p=$(grep -E '^\s*ListenPort\s*=' /etc/wireguard/wg0.conf | head -n1 | awk -F= '{gsub(/[[:space:]]/,"",$2); print $2}')
+        [[ -n "$p" ]] && WG_PORTS+=("$p")
+    fi
+    WG_PORTS+=("51820" "51821")
+
+    wg-quick down wg1 >/dev/null 2>&1 || true
+    wg-quick down wg0 >/dev/null 2>&1 || true
+
+    systemctl stop wg-quick@wg1 2>/dev/null || true
+    systemctl disable wg-quick@wg1 2>/dev/null || true
+    systemctl stop wg-quick@wg0 2>/dev/null || true
+    systemctl disable wg-quick@wg0 2>/dev/null || true
+
+    for port in "${WG_PORTS[@]}"; do
+        [[ -z "$port" ]] && continue
+        iptables -D INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1 || true
+        iptables -D INPUT -p udp --dport "$port" -j ACCEPT -m comment --comment "wireguard" >/dev/null 2>&1 || true
+        ip6tables -D INPUT -p udp --dport "$port" -j ACCEPT >/dev/null 2>&1 || true
+        ip6tables -D INPUT -p udp --dport "$port" -j ACCEPT -m comment --comment "wireguard" >/dev/null 2>&1 || true
+        if command -v ufw >/dev/null 2>&1; then
+            ufw --force delete allow "$port"/udp >/dev/null 2>&1 || true
+        fi
+    done
+
+    if [[ -f /etc/iptables/rules.v4 ]]; then
+        tmpf=$(mktemp)
+        grep -vE '(^-A .* (wg1|wg0) )|(^-A .* -i (wg1|wg0) )|(^-A .* -o (wg1|wg0) )|(10\.201\.201\.)|(wireguard)' /etc/iptables/rules.v4 > "$tmpf" || true
+        for port in "${WG_PORTS[@]}"; do
+            [[ -z "$port" ]] && continue
+            grep -vE "(--dport[[:space:]]+$port\b)" "$tmpf" > "${tmpf}.2" || true
+            mv "${tmpf}.2" "$tmpf"
+        done
+        mv "$tmpf" /etc/iptables/rules.v4
+    fi
+
+    if [[ -f /etc/iptables/rules.v6 ]]; then
+        tmpf=$(mktemp)
+        grep -vE '(^-A .* (wg1|wg0) )|(^-A .* -i (wg1|wg0) )|(^-A .* -o (wg1|wg0) )|(10\.201\.201\.)|(wireguard)' /etc/iptables/rules.v6 > "$tmpf" || true
+        for port in "${WG_PORTS[@]}"; do
+            [[ -z "$port" ]] && continue
+            grep -vE "(--dport[[:space:]]+$port\b)" "$tmpf" > "${tmpf}.2" || true
+            mv "${tmpf}.2" "$tmpf"
+        done
+        mv "$tmpf" /etc/iptables/rules.v6
+    fi
+
+    if command -v netfilter-persistent >/dev/null 2>&1; then
+        netfilter-persistent save >/dev/null 2>&1 || true
+    fi
+
+    apt-get remove --purge wireguard wireguard-tools -y >/dev/null 2>&1 || true
+    rm -rf /etc/wireguard
+
+    echo -e "${GREEN}[✔] WireGuard has been uninstalled successfully!${RESET}"
+}
+
+
 check_openvpn_installed() {
     command -v openvpn &>/dev/null && echo "installed" || echo "not_installed"
 }
@@ -124,6 +194,11 @@ check_cisco_installed() {
 check_l2tp_installed() {
     command -v xl2tpd &>/dev/null && echo "installed" || echo "not_installed"
 }
+
+check_wireguard_installed() {
+    command -v wg &>/dev/null && echo "installed" || echo "not_installed"
+}
+
 
 change_username() {
     read -p "Enter new username: " new_user
@@ -226,6 +301,8 @@ show_panel_info() {
     echo -e "${BLUE}systemctl restart ocserv${RESET}"
     echo -e "${YELLOW}To restart L2TP/IPsec:${RESET}"
     echo -e "${BLUE}systemctl restart xl2tpd${RESET}"
+    echo -e "${YELLOW}To restart WireGuard:${RESET}"
+    echo -e "${BLUE}systemctl restart wg-quick@wg1${RESET}"
 
     echo -e "\n${CYAN}========= Log Monitoring =========${RESET}"
     echo -e "${YELLOW}OpenVPN Core Logs:${RESET}"
@@ -236,6 +313,8 @@ show_panel_info() {
     echo -e "${BLUE}journalctl -u ocserv -e -f${RESET}"
     echo -e "${YELLOW}L2TP/IPsec Logs:${RESET}"
     echo -e "${BLUE}journalctl -u xl2tpd -e -f${RESET}"
+    echo -e "${YELLOW}WireGuard Logs:${RESET}"
+    echo -e "${BLUE}journalctl -u wg-quick@wg1 -e -f${RESET}"
 
     echo -e "\n${CYAN}========= Service Status =========${RESET}"
     
@@ -261,6 +340,12 @@ show_panel_info() {
         echo -e "${GREEN}[✔] L2TP service is running${RESET}"
     else
         echo -e "${RED}[✘] L2TP service is NOT running${RESET}"
+    fi
+
+    if systemctl is-active --quiet wg-quick@wg1; then
+        echo -e "${GREEN}[✔] WireGuard (wg1) service is running${RESET}"
+    else
+        echo -e "${RED}[✘] WireGuard (wg1) service is NOT running${RESET}"
     fi
 
     echo
@@ -292,11 +377,13 @@ show_menu() {
     web_panel_status=$(check_web_panel_installed)
     cisco_status=$(check_cisco_installed)
     l2tp_status=$(check_l2tp_installed)
+    wireguard_status=$(check_wireguard_installed)
 
     [[ "$openvpn_status" == "installed" ]] && echo -e "${GREEN}[✔] OpenVPN Core     : Installed${RESET}" || echo -e "${RED}[✘] OpenVPN Core     : Not Installed${RESET}"
     [[ "$web_panel_status" == "installed" ]] && echo -e "${GREEN}[✔] OpenVPN Web Panel: Installed${RESET}" || echo -e "${RED}[✘] OpenVPN Web Panel: Not Installed${RESET}"
     [[ "$cisco_status" == "installed" ]] && echo -e "${GREEN}[✔] Cisco AnyConnect : Installed${RESET}" || echo -e "${RED}[✘] Cisco AnyConnect : Not Installed${RESET}"
     [[ "$l2tp_status" == "installed" ]] && echo -e "${GREEN}[✔] L2TP/IPsec       : Installed${RESET}" || echo -e "${RED}[✘] L2TP/IPsec       : Not Installed${RESET}"
+    [[ "$wireguard_status" == "installed" ]] && echo -e "${GREEN}[✔] WireGuard        : Installed${RESET}" || echo -e "${RED}[✘] WireGuard        : Not Installed${RESET}"
 
     echo ""
 
@@ -318,6 +405,10 @@ show_menu() {
         options+=("Install L2TP/IPsec")
     fi
 
+    if [[ "$wireguard_status" == "not_installed" ]]; then
+        options+=("Install WireGuard")
+    fi
+
     echo "-------------------------------------"
 
     if [[ "$openvpn_status" == "installed" ]]; then
@@ -337,6 +428,10 @@ show_menu() {
 
     if [[ "$l2tp_status" == "installed" ]]; then
         options+=("Uninstall L2TP/IPsec")
+    fi
+
+    if [[ "$wireguard_status" == "installed" ]]; then
+        options+=("Uninstall WireGuard")
     fi
 
     options+=("Exit")
