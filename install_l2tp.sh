@@ -8,17 +8,20 @@ VPN_SUBNET="192.168.42.0/24"
 
 export DEBIAN_FRONTEND=noninteractive
 
-echo ">>> Updating and installing packages..."
-apt-get update
-apt-get install -y strongswan xl2tpd ppp net-tools iptables-persistent
+killall apt apt-get dpkg 2>/dev/null || true
+rm -f /var/lib/apt/lists/lock
+rm -f /var/cache/apt/archives/lock
+rm -f /var/lib/dpkg/lock*
+dpkg --configure -a
 
-echo ">>> Enabling IP Forwarding..."
+apt-get update
+apt-get install -y --fix-broken strongswan xl2tpd ppp net-tools iptables-persistent
+
 sed -i 's/#net.ipv4.ip_forward=1/net.ipv4.ip_forward=1/' /etc/sysctl.conf
 sysctl -w net.ipv4.ip_forward=1 > /dev/null 2>&1
 sysctl -p > /dev/null 2>&1 || true
 
-
-echo ">>> Fixing strongswan.conf..."
+mkdir -p /etc/strongswan.d
 if [ ! -f /etc/strongswan.conf ]; then
 cat > /etc/strongswan.conf <<EOF
 charon {
@@ -30,7 +33,6 @@ charon {
 include strongswan.d/*.conf
 EOF
 fi
-
 
 if [ -f /etc/ipsec.conf ]; then mv /etc/ipsec.conf /etc/ipsec.conf.bak.$(date +%s); fi
 cat > /etc/ipsec.conf <<EOF
@@ -70,6 +72,7 @@ cat > /etc/ipsec.secrets <<EOF
 EOF
 chmod 600 /etc/ipsec.secrets
 
+mkdir -p /etc/xl2tpd
 if [ -f /etc/xl2tpd/xl2tpd.conf ]; then mv /etc/xl2tpd/xl2tpd.conf /etc/xl2tpd/xl2tpd.conf.bak.$(date +%s); fi
 cat > /etc/xl2tpd/xl2tpd.conf <<EOF
 [global]
@@ -87,6 +90,7 @@ pppoptfile = /etc/ppp/options.xl2tpd
 length bit = yes
 EOF
 
+mkdir -p /etc/ppp
 if [ -f /etc/ppp/options.xl2tpd ]; then mv /etc/ppp/options.xl2tpd /etc/ppp/options.xl2tpd.bak.$(date +%s); fi
 cat > /etc/ppp/options.xl2tpd <<EOF
 require-mschap-v2
@@ -107,7 +111,6 @@ EOF
 touch /etc/ppp/chap-secrets
 chmod 600 /etc/ppp/chap-secrets
 
-echo ">>> Setting up Monitoring Hooks (Safe Mode)..."
 mkdir -p /etc/ppp/ip-up.d
 mkdir -p /etc/ppp/ip-down.d
 
@@ -172,9 +175,8 @@ add_rule INPUT -p udp --dport 1701 -j ACCEPT
 add_rule FORWARD -i ppp+ -o $MAIN_IFACE -j ACCEPT
 add_rule FORWARD -i $MAIN_IFACE -o ppp+ -j ACCEPT
 
-# TYPO FIXED HERE: PO STROUTING -> POSTROUTING
 iptables -t nat -C POSTROUTING -s $VPN_SUBNET -o $MAIN_IFACE -j MASQUERADE 2>/dev/null || iptables -t nat -I POSTROUTING -s $VPN_SUBNET -o $MAIN_IFACE -j MASQUERADE
 
 netfilter-persistent save > /dev/null 2>&1 || true
 
-echo "✅ L2TP installed successfully (Safe & Stable)."
+echo "L2TP Installed Successfully."
