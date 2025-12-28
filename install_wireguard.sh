@@ -4,7 +4,7 @@ set -euo pipefail
 WG_IFACE="${WG_IFACE:-wg1}"
 WG_DIR="${WG_DIR:-/etc/wireguard}"
 WG1_PORT="${WG1_PORT:-51821}"
-WG1_ADDR="${WG1_ADDR:-10.201.201.1/24}"
+WG1_ADDR="${WG1_ADDR:-10.201.201.1/16}"
 
 WG_CONF="${WG_DIR}/${WG_IFACE}.conf"
 WG_BASE="${WG_DIR}/${WG_IFACE}_base.conf"
