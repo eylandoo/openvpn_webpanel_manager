@@ -97,8 +97,9 @@ require-mschap-v2
 ms-dns 8.8.8.8
 ms-dns 1.1.1.1
 auth
-mtu 1200
-mru 1000
+noipv6
+mtu 1400
+mru 1400
 crtscts
 hide-password
 modem
