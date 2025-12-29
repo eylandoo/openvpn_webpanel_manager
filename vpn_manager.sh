@@ -95,6 +95,12 @@ uninstall_cisco() {
     systemctl disable ocserv
     apt-get remove --purge ocserv -y
     rm -rf /etc/ocserv
+
+    if [[ -f /root/settings.json ]]; then
+        sed -i 's/"cisco_default_port":[[:space:]]*[0-9]\+/"cisco_default_port": 4443/g' /root/settings.json
+        echo -e "${GREEN}[✔] Cisco port reset to 4443 in settings.json${RESET}"
+    fi
+
     echo -e "${GREEN}[✔] Cisco AnyConnect has been uninstalled successfully!${RESET}"
 }
 
@@ -171,6 +177,11 @@ uninstall_wireguard() {
     apt-get remove --purge wireguard wireguard-tools -y >/dev/null 2>&1 || true
     rm -rf /etc/wireguard
 
+    if [[ -f /root/settings.json ]]; then
+        sed -i 's/"wg1_default_port":[[:space:]]*[0-9]\+/"wg1_default_port": 51821/g' /root/settings.json
+        echo -e "${GREEN}[✔] WireGuard port reset to 51821 in settings.json${RESET}"
+    fi
+
     echo -e "${GREEN}[✔] WireGuard has been uninstalled successfully!${RESET}"
 }
 
@@ -196,7 +207,11 @@ check_l2tp_installed() {
 }
 
 check_wireguard_installed() {
-    command -v wg &>/dev/null && echo "installed" || echo "not_installed"
+    if command -v wg &>/dev/null && ls /etc/wireguard/*.conf 1> /dev/null 2>&1; then
+        echo "installed"
+    else
+        echo "not_installed"
+    fi
 }
 
 
