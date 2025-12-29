@@ -478,7 +478,7 @@ show_menu() {
             draw_progress_bar 2
             clear
             bash /root/install_cisco.sh
-            # rm -f /root/install_cisco.sh  (REMOVED TO KEEP FILE IN ROOT)
+            # rm -f /root/install_cisco.sh
             echo -e "${GREEN}Installation Finalizing...${RESET}"
             draw_progress_bar 1
             echo -e "${GREEN}[✔] Cisco AnyConnect Installation Completed.${RESET}"
@@ -494,12 +494,28 @@ show_menu() {
             draw_progress_bar 2
             clear
             bash /root/install_l2tp.sh
-            # rm -f /root/install_l2tp.sh (REMOVED TO KEEP FILE IN ROOT)
+            # rm -f /root/install_l2tp.sh
             echo -e "${GREEN}Installation Finalizing...${RESET}"
             draw_progress_bar 1
             echo -e "${GREEN}[✔] L2TP/IPsec Installation Completed.${RESET}"
             read -p "Press Enter to return to menu..." ;;
             
+        "Install WireGuard")
+            clear
+            echo -e "${CYAN}Downloading WireGuard Installation Script...${RESET}"
+            wget -q -O /root/install_wireguard.sh https://raw.githubusercontent.com/eylandoo/openvpn_webpanel_manager/main/install_wireguard.sh
+            chmod +x /root/install_wireguard.sh
+            echo -e "${GREEN}Download Complete.${RESET}"
+            echo -e "${YELLOW}Starting Installation Process...${RESET}"
+            draw_progress_bar 2
+            clear
+            bash /root/install_wireguard.sh
+            # rm -f /root/install_wireguard.sh
+            echo -e "${GREEN}Installation Finalizing...${RESET}"
+            draw_progress_bar 1
+            echo -e "${GREEN}[✔] WireGuard Installation Completed.${RESET}"
+            read -p "Press Enter to return to menu..." ;;
+
         "Uninstall OpenVPN Core")
             echo -e "${YELLOW}Are you sure you want to uninstall OpenVPN? (y/n): ${RESET}"
             read confirm
@@ -520,6 +536,11 @@ show_menu() {
             read confirm
             [[ "$confirm" =~ ^[yY]$ ]] && uninstall_l2tp || echo -e "${YELLOW}Uninstall canceled.${RESET}" ;;
             
+        "Uninstall WireGuard")
+            echo -e "${YELLOW}Are you sure you want to uninstall WireGuard? (y/n): ${RESET}"
+            read confirm
+            [[ "$confirm" =~ ^[yY]$ ]] && uninstall_wireguard || echo -e "${YELLOW}Uninstall canceled.${RESET}" ;;
+
         "Show Web Panel Info")
             show_panel_info ;;
             
