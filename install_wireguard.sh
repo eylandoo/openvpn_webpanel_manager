@@ -98,9 +98,9 @@ ListenPort = ${WG1_PORT}
 PrivateKey = $(cat "${WG_PRIV}")
 SaveConfig = false
 
-
-PostUp = ip route add 10.201.0.0/24 dev %i 2>/dev/null || true; iptables -t nat -I POSTROUTING 1 -s 10.201.0.0/24 -o ${pub_iface} -j MASQUERADE
-PostDown = ip route del 10.201.0.0/24 dev %i 2>/dev/null || true; iptables -t nat -D POSTROUTING -s 10.201.0.0/24 -o ${pub_iface} -j MASQUERADE
+# NAT + Forward (idempotent to avoid duplicated rules)
+PostUp = iptables -C FORWARD -i %i -j ACCEPT 2>/dev/null || iptables -A FORWARD -i %i -j ACCEPT; iptables -C FORWARD -o %i -j ACCEPT 2>/dev/null || iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -C POSTROUTING -o ${pub_iface} -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o ${pub_iface} -j MASQUERADE
+PostDown = iptables -D FORWARD -i %i -j ACCEPT 2>/dev/null || true; iptables -D FORWARD -o %i -j ACCEPT 2>/dev/null || true; iptables -t nat -D POSTROUTING -o ${pub_iface} -j MASQUERADE 2>/dev/null || true
 EOF
 
   chmod 600 "${WG_BASE}" || true
