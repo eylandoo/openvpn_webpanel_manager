@@ -5,8 +5,8 @@
 [![Tailwind CSS](https://img.shields.io/badge/UI-Tailwind_CSS-38B2AC?logo=tailwind-css)](https://tailwindcss.com/)
 [![License: All Rights Reserved](https://img.shields.io/badge/License-All_Rights_Reserved-blue)](LICENSE)
 
-
-**OVPN Manager 2.0.0** is a comprehensive, self-hosted web panel built on Flask, engineered for high scalability and stability. It centralizes the management of not just OpenVPN, but also **Cisco AnyConnect (Ocserv)** and **L2TP/IPsec** protocols. This major update transforms the panel into a high-performance solution for managing users, resellers, and multi-node deployments across diverse VPN protocols.
+**OVPN Manager 3.0.0** is a comprehensive, self-hosted web panel built on Flask, engineered for high scalability and stability. It centralizes the management of not just OpenVPN, but also **Cisco AnyConnect (Ocserv)**, **L2TP/IPsec**, and now **WireGuard (wg1)**.  
+This major update transforms the panel into a high-performance solution for managing users, resellers, and multi-node deployments across diverse VPN protocols.
 
 The panel is designed for administrators demanding granular control over user access, traffic, and server resources with a focus on core architecture stability.
 
@@ -15,13 +15,14 @@ The panel is designed for administrators demanding granular control over user ac
 ![OVPN Manager Dashboard](https://uploadkon.ir/uploads/803c11_25eylanpanel.png)
 ---
 
-## ✨ Key Features (v2.0.0 Update)
+## ✨ Key Features (v3.0.0 Update)
 
 ### 🛡️ Multi-Protocol & Core Stability
 * **Multi-Protocol Support**: Full integration and management for:
     * **OpenVPN** (UDP/TCP)
     * **Cisco AnyConnect (Ocserv)**
     * **L2TP/IPsec**
+    * **WireGuard (wg1)**
 * **Database Scalability**: Added core support for **PostgreSQL** alongside SQLite. Includes a **Smart Migration Engine** to securely and automatically transfer all existing user data from SQLite to PostgreSQL for high-load environments.
 * **Persistent Security Key**: Implemented a security fix to store the `SECRET_KEY` persistently, enhancing session security and preventing forced admin logouts after service restarts.
 * **Concurrency Fixes**: Major architectural upgrade with the implementation of `DB_WRITE_LOCK` and `GLOBAL_SYNC_LOCK` to eliminate deadlocks and database corruption under high traffic/activity.
@@ -29,6 +30,7 @@ The panel is designed for administrators demanding granular control over user ac
 ### User Management
 * **Create Users**: Add single or bulk users.
 * **Protocol-Specific Passwords**: Set unique passwords for L2TP and Cisco for each user.
+* **WireGuard User Data**: Automatically manage WireGuard (wg1) user requirements (keys/IP) alongside other protocols.
 * **Detailed Limits**: Set specific limits for each user:
     * **Data Limit**: Assign quotas in GB or MB.
     * **Connection Limit**: Define the maximum number of simultaneous connections (per protocol).
@@ -43,16 +45,16 @@ The panel is designed for administrators demanding granular control over user ac
 * **Independent Management**: Sub-admins manage their own users within the limits you've set.
 
 ### Multi-Node Support
-* **Centralized Control**: Manage and sync users across multiple servers (nodes) for OpenVPN, Cisco, and L2TP from a single main panel.
+* **Centralized Control**: Manage and sync users across multiple servers (nodes) for OpenVPN, Cisco, L2TP, and WireGuard from a single main panel.
 * **Node Health Monitoring**: View the live status of all connected nodes.
-* **Protocol Provisioning**: New nodes are intelligently configured to support all three enabled protocols automatically during setup.
-* **Tunnel Visibility**: Granular control to show/hide specific protocol configurations (OpenVPN, Cisco, L2TP) for users connected to a particular tunnel.
+* **Protocol Provisioning**: New nodes are intelligently configured to support all enabled protocols automatically during setup.
+* **Tunnel Visibility**: Granular control to show/hide specific protocol configurations (OpenVPN, Cisco, L2TP, WireGuard) for users connected to a particular tunnel.
 
 ### Server & Panel Administration
 * **Scheduler Upgrade**: Switched from `GeventExecutor` to **`ThreadPoolExecutor`** for background jobs, significantly improving the stability and responsiveness of the panel under load.
 * **Enhanced SSL Management**: Includes a re-written SSL engine with advanced support for SNI (Server Name Indication) and automated "Double-Tap Restart" to ensure smooth certificate renewal and application.
-* **Backup & Restore**: Create full backups, now including configurations and user data for all three protocols (OpenVPN, Cisco, L2TP).
-* **Advanced Configuration**: Directly edit configuration files for the main server and each node, including `server.conf`, `ocserv.conf`, and IPsec settings.
+* **Backup & Restore**: Create full backups, now including configurations and user data for all supported protocols (OpenVPN, Cisco, L2TP, WireGuard).
+* **Advanced Configuration**: Directly edit configuration files for the main server and each node, including `server.conf`, `ocserv.conf`, IPsec settings, and WireGuard configuration as applicable.
 * **Customization**: Change the panel port, set a custom admin URL path, and switch between dark and light themes.
 
 ### API
@@ -66,7 +68,7 @@ The panel is a robust Flask application acting as the central management brain.
 
 * **Backend**: **Flask**, **Gevent** (for WSGI), **SQLAlchemy** (for database ORM)
 * **Database**: **PostgreSQL** (Recommended for scale) or **SQLite**
-* **Core Management**: Interacts directly with `systemctl` and dedicated scripts for managing **OpenVPN**, **Ocserv**, and **Libreswan (L2TP/IPsec)** services.
+* **Core Management**: Interacts directly with `systemctl` and dedicated scripts for managing **OpenVPN**, **Ocserv**, **Libreswan (L2TP/IPsec)**, and **WireGuard (wg1)** services.
 * **Frontend**: **Tailwind CSS**, **Font Awesome**, Vanilla JavaScript
 * **Scheduling**: **APScheduler** utilizing **ThreadPoolExecutor** for high-stability background tasks.
 
@@ -90,7 +92,7 @@ wget -q -O /root/vpn_manager.sh https://raw.githubusercontent.com/eylandoo/openv
 ### Step 2: Install VPN Cores
 After running the command, an interactive menu will appear.
 
-1. Select the **Install OpenVPN Core**, **Install Cisco AnyConnect**, or **Install L2TP/IPsec** option(s).
+1. Select the **Install OpenVPN Core**, **Install Cisco AnyConnect**, **Install L2TP/IPsec** , or **Install Wireguard** option(s).
 2. Follow the prompts to configure the desired protocols.
 3. The script will handle all installations automatically.
 
