@@ -33,7 +33,7 @@ WG1_PEERS_DB = "/etc/wireguard/wg1_peers.json"
 WG1_IFACE = "wg1"
 WG1_HANDSHAKE_TIMEOUT = 120
 
-WG1_TRAFFIC_TIMEOUT = 10 
+WG1_TRAFFIC_TIMEOUT = 10
 WG1_PEER_ACTIVITY = {}
 WG1_DB_MUTEX = threading.RLock()
 WG1_DB_LAST_ERR_LOG = 0.0
@@ -42,7 +42,7 @@ WG1_DB_ERR_LOG_EVERY = 10.0
 WG1_DB_CACHE = {}
 WG1_DB_LAST_MTIME = 0
 
-L2TP_SESSION_CACHE = {} 
+L2TP_SESSION_CACHE = {}
 L2TP_CACHE_LOCK = threading.Lock()
 
 Path(OVPN_FILES_DIR).mkdir(parents=True, exist_ok=True)
@@ -297,14 +297,10 @@ class StatusHandler(BaseHTTPRequestHandler):
         return sessions
 
     def _extract_l2tp_sessions(self, detailed_users):
-        """
-        نسخه توربو (Turbo): با سیستم کش هوشمند برای کاهش 90 درصدی مصرف CPU
-        """
         global L2TP_SESSION_CACHE, L2TP_CACHE_LOCK
         sessions = []
         current_system_time = time.time()
         
-        # لیست تمام اینترفیس‌های ppp موجود در سیستم
         try:
             all_sys_ifaces = glob.glob("/sys/class/net/ppp*")
             all_iface_names = {os.path.basename(p) for p in all_sys_ifaces}
@@ -314,7 +310,6 @@ class StatusHandler(BaseHTTPRequestHandler):
 
         processed_ifaces = set()
 
-        # 1. خواندن فایل متنی (سریع)
         lines = []
         if os.path.exists(L2TP_ACTIVE_FILE):
             try:
@@ -322,7 +317,6 @@ class StatusHandler(BaseHTTPRequestHandler):
                     lines = f.readlines()
             except: pass
 
-        # دیکشنری کمکی برای اطلاعات فایل متنی
         file_info_map = {}
         for line in lines:
             try:
@@ -334,48 +328,37 @@ class StatusHandler(BaseHTTPRequestHandler):
             except: pass
 
         with L2TP_CACHE_LOCK:
-            # پاکسازی کش از اینترفیس‌های قطع شده
             for cached_iface in list(L2TP_SESSION_CACHE.keys()):
                 if cached_iface not in all_iface_names:
                     del L2TP_SESSION_CACHE[cached_iface]
 
-            # حلقه اصلی روی تمام اینترفیس‌های موجود
             for iface in all_iface_names:
                 username = None
                 pid = 0
                 conn_time = current_system_time
                 
-                # --- استراتژی کش ---
                 cached = L2TP_SESSION_CACHE.get(iface)
                 cache_valid = False
                 
-                # اگر در کش داریم، چک کنیم پروسه هنوز زنده است؟
                 if cached:
                     try:
-                        # چک کردن سریع وجود پروسه (بسیار سبک)
                         if os.path.exists(f"/proc/{cached['pid']}"):
                             cache_valid = True
                     except: pass
                 
                 if cache_valid:
-                    # استفاده از اطلاعات کش (بدون خواندن دیسک)
                     username = cached['username']
                     pid = cached['pid']
                     conn_time = cached['conn_time']
                     
-                    # اگر فایل متنی آپدیت شده و یوزرنیم فرق کرده (بعید است)، آپدیت کن
                     if iface in file_info_map and file_info_map[iface] != username:
                         username = file_info_map[iface]
                         L2TP_SESSION_CACHE[iface]['username'] = username
                 
                 else:
-                    # کش موجود نیست، باید سنگین کار کنیم (فقط یک بار)
-                    
-                    # اولویت 1: فایل متنی (چون سریعتر است)
                     if iface in file_info_map:
                         username = file_info_map[iface]
                     
-                    # پیدا کردن PID و Time
                     try:
                         pid_path = f"/var/run/{iface}.pid"
                         if os.path.exists(pid_path):
@@ -384,7 +367,6 @@ class StatusHandler(BaseHTTPRequestHandler):
                                 pid = int(f.read().strip() or 0)
                     except: pass
                     
-                    # اولویت 2: اسکن cmdline (سنگین‌ترین بخش - فقط اگر یوزر در فایل نبود)
                     if not username and pid > 0:
                         try:
                             with open(f"/proc/{pid}/cmdline", "rb") as f_cmd:
@@ -399,7 +381,6 @@ class StatusHandler(BaseHTTPRequestHandler):
                                         break
                         except: pass
                     
-                    # اگر اطلاعات پیدا شد، کش کن
                     if username and pid > 0:
                         L2TP_SESSION_CACHE[iface] = {
                             'username': username,
@@ -407,7 +388,6 @@ class StatusHandler(BaseHTTPRequestHandler):
                             'conn_time': conn_time
                         }
 
-                # اگر در نهایت یوزری پیدا شد، ترافیک را بخوان و اضافه کن
                 if username:
                     processed_ifaces.add(iface)
                     rx, tx = 0, 0
@@ -427,7 +407,6 @@ class StatusHandler(BaseHTTPRequestHandler):
                         "session_id": pid,
                     })
 
-                    # آپدیت دیکشنری detailed_users (طبق منطق کد اصلی شما)
                     legacy_key = "L2TP/IPsec"
                     if username not in detailed_users: detailed_users[username] = {}
                     if legacy_key not in detailed_users[username]:
@@ -1683,35 +1662,65 @@ class StatusHandler(BaseHTTPRequestHandler):
                         else:
                             success, msg = False, "Missing peers list"
 
-                    elif cmd == "kill":
-                        if uname:
+                    elif cmd == "kill" or cmd == "kill_id":
+                        uname = str(item.get("username") or "").strip()
+                        sid = item.get("session_id")
+                        proto = str(item.get("protocol") or "")
+                        mgmt_port = item.get("mgmt_port")
+                        
+                        success = False
+                        msg = "Init"
+
+                        if sid:
+                            try:
+                                if "Cisco" in proto:
+                                    subprocess.run([OCCTL_BIN, "disconnect", "id", str(sid)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                    success = True
+                                    msg = "Killed Cisco ID"
+                                elif "L2TP" in proto:
+                                    os.kill(int(sid), 9)
+                                    success = True
+                                    msg = "Killed L2TP PID"
+                                elif "OpenVPN" in proto:
+                                    ports = [mgmt_port] if mgmt_port else self._get_all_management_ports()
+                                    for p in ports:
+                                        try:
+                                            with socket.create_connection(("127.0.0.1", int(p)), timeout=2) as s:
+                                                s.settimeout(2)
+                                                s.recv(1024)
+                                                s.sendall(f"client-kill {sid}\n".encode("utf-8"))
+                                                s.recv(1024)
+                                        except: pass
+                                    success = True
+                                    msg = "Killed OVPN CID"
+                                elif "WireGuard" in proto or "WG" in proto:
+                                    self._wg1_kick_peer(str(sid))
+                                    success = True
+                                    msg = "Kicked WG Peer"
+                            except Exception as e:
+                                success = False
+                                msg = str(e)
+
+                        if not success and uname:
                             try:
                                 subprocess.run(["pkill", "-9", "-f", f"pppd.*name {uname}"], check=False)
-                            except:
-                                pass
+                            except: pass
+
                             try:
                                 if os.path.exists(OCCTL_BIN):
                                     subprocess.run([OCCTL_BIN, "disconnect", "user", str(uname)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                            except:
-                                pass
+                            except: pass
+
                             try:
                                 for port in self._get_all_management_ports():
                                     try:
                                         with socket.create_connection(("127.0.0.1", port), timeout=2) as s:
                                             s.settimeout(2)
-                                            try:
-                                                s.recv(1024)
-                                            except:
-                                                pass
+                                            s.recv(1024)
                                             s.sendall(f"kill {uname}\n".encode("utf-8"))
-                                            try:
-                                                s.recv(1024)
-                                            except:
-                                                pass
-                                    except:
-                                        pass
-                            except:
-                                pass
+                                            s.recv(1024)
+                                    except: pass
+                            except: pass
                             
                             try:
                                 if os.path.exists(L2TP_ACTIVE_FILE):
@@ -1726,77 +1735,20 @@ class StatusHandler(BaseHTTPRequestHandler):
                                         f.flush()
                                         os.fsync(f.fileno())
                                         fcntl.flock(f, fcntl.LOCK_UN)
-                            except:
-                                pass
+                            except: pass
 
                             try:
                                 dbp = self._wg1_load_peers_db()
                                 if uname in dbp:
                                     pub = (dbp.get(uname) or {}).get('public_key')
                                     if pub:
-                                        try:
-                                            r = subprocess.run(["wg", "show", WG1_IFACE, "peers"], capture_output=True, text=True)
-                                            peers_txt = (r.stdout or "") if r.returncode == 0 else ""
-                                            if pub in peers_txt.split():
-                                                self._wg1_kick_peer(pub)
-                                        except:
-                                            pass
-                            except:
-                                pass
-                            success, msg = True, "Kill Signal Sent"
-                        else:
-                            success, msg = False, "Missing username"
+                                        self._wg1_kick_peer(pub)
+                            except: pass
+                            
+                            success = True
+                            msg = "Full Kill Sent"
 
-                    elif cmd == "kill_id":
-                        sid = item.get("session_id")
-                        proto = str(item.get("protocol") or "")
-                        uname2 = (item.get("username") or "").strip()
-                        try:
-                            if sid is not None and ("Cisco" in proto):
-                                subprocess.run(
-                                    [OCCTL_BIN, "disconnect", "id", str(sid)],
-                                    check=False,
-                                    stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL,
-                                )
-                                success, msg = True, "Killed by ID"
-
-                            elif sid is not None and ("L2TP" in proto):
-                                subprocess.run(
-                                    ["kill", "-9", str(sid)],
-                                    check=False,
-                                    stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL,
-                                )
-                                success, msg = True, "Killed by ID"
-
-                            elif sid is not None and ("OpenVPN" in proto):
-                                for port in self._get_all_management_ports():
-                                    try:
-                                        with socket.create_connection(("127.0.0.1", port), timeout=2) as s:
-                                            s.settimeout(2)
-                                            try:
-                                                s.recv(1024)
-                                            except:
-                                                pass
-                                            s.sendall(f"client-kill {sid}\n".encode("utf-8"))
-                                            try:
-                                                s.recv(1024)
-                                            except:
-                                                pass
-                                    except:
-                                        pass
-                                success, msg = True, "Killed by ID"
-
-                            elif sid is not None and ("WireGuard" in proto):
-                                self._wg1_kick_peer(str(sid))
-                                success, msg = True, "Killed by ID"
-
-                            else:
-                                success, msg = False, "Unsupported"
-
-                        except:
-                            success, msg = False, "Kill ID failed"
+                        results.append({"username": uname, "success": success, "message": msg})
 
                     elif cmd == "delete_user_completely":
                         if uname:
