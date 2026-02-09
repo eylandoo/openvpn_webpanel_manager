@@ -45,6 +45,11 @@ WG1_DB_LAST_MTIME = 0
 L2TP_SESSION_CACHE = {}
 L2TP_CACHE_LOCK = threading.Lock()
 
+GLOBAL_DATA_STORE = {
+    "data": None,
+    "lock": threading.Lock()
+}
+
 Path(OVPN_FILES_DIR).mkdir(parents=True, exist_ok=True)
 Path(CCD_DIR).mkdir(parents=True, exist_ok=True)
 
@@ -52,6 +57,10 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
 
 class StatusHandler(BaseHTTPRequestHandler):
+    def __init__(self, request, client_address, server, run_setup=True):
+        if run_setup:
+            super().__init__(request, client_address, server)
+
     def _log(self, message):
         return
 
@@ -945,6 +954,11 @@ class StatusHandler(BaseHTTPRequestHandler):
             return False, f"Write failed: {str(e)}"
 
     def _handle_cisco_single(self, cmd):
+
+        import subprocess
+        import os
+        import fcntl
+        
         uname = (cmd.get("username") or "").strip()
         passw = cmd.get("password")
         action = (cmd.get("action") or "add").strip().lower()
@@ -952,27 +966,68 @@ class StatusHandler(BaseHTTPRequestHandler):
         if not uname:
             return False, "Missing username"
 
-        Path(os.path.dirname(OCPASSWD) or "/").mkdir(parents=True, exist_ok=True)
-        if not os.path.exists(OCPASSWD):
-            try:
-                with open(OCPASSWD, "wb") as f:
-                    f.write(b"")
-            except:
-                return False, "Cannot init ocpasswd file"
+        ocpasswd_file = "/etc/ocserv/ocpasswd"
 
         try:
-            if action == "delete":
-                subprocess.run(["ocpasswd", "-c", OCPASSWD, "-d", uname], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                return True, "Cisco delete success"
-            if action in ["add", "update"]:
-                if not passw:
-                    return False, "Missing password"
-                proc = subprocess.Popen(["ocpasswd", "-c", OCPASSWD, uname], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                proc.communicate(input=f"{passw}\n{passw}\n".encode("utf-8"))
-                return True, f"Cisco {action} success"
-            return False, "Unknown action"
-        except:
-            return False, "Cisco action failed"
+            os.makedirs(os.path.dirname(ocpasswd_file), exist_ok=True)
+            if not os.path.exists(ocpasswd_file):
+                with open(ocpasswd_file, "w") as f:
+                    pass
+        except Exception as e:
+            return False, f"Init failed: {e}"
+
+        try:
+            hashed_pw = ""
+            if action in ["add", "update"] and passw:
+                try:
+                    salt = os.urandom(8).hex()
+                    chk = subprocess.check_output(
+                        ["openssl", "passwd", "-6", "-salt", salt, passw], 
+                        stderr=subprocess.DEVNULL
+                    ).decode().strip()
+                    hashed_pw = f"{uname}:*:{chk}"
+                except:
+                    return False, "OpenSSL failed to generate hash"
+
+            with open(ocpasswd_file, 'r+') as f:
+                fcntl.flock(f, fcntl.LOCK_EX)
+                try:
+                    lines = f.readlines()
+                    new_lines = []
+                    user_found = False
+                    user_prefix = f"{uname}:"
+
+                    for line in lines:
+                        if not line.strip(): continue
+                        if line.startswith(user_prefix):
+                            user_found = True
+                            if action == "delete":
+                                continue
+                            elif action in ["add", "update"]:
+                                new_lines.append(hashed_pw + "\n")
+                        else:
+                            new_lines.append(line)
+
+                    if action in ["add", "update"] and not user_found:
+                        new_lines.append(hashed_pw + "\n")
+
+                    # بازنویسی
+                    f.seek(0)
+                    f.truncate()
+                    f.writelines(new_lines)
+                    f.flush()
+                    os.fsync(f.fileno())
+                finally:
+                    fcntl.flock(f, fcntl.LOCK_UN)
+
+            subprocess.run(["occtl", "reload"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            
+            subprocess.run(["pkill", "-HUP", "ocserv-main"], check=False)
+
+            return True, f"Cisco {action} done via OpenSSL"
+
+        except Exception as e:
+            return False, f"Cisco Error: {str(e)}"
 
     def _update_iptables_port(self, port):
         p = str(int(port))
@@ -1220,51 +1275,21 @@ class StatusHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         try:
-            cpu, ram, disk = self._get_system_stats()
-
-            detailed_users = {}
-            sessions = []
+            response_data = None
+            with GLOBAL_DATA_STORE["lock"]:
+                if GLOBAL_DATA_STORE["data"]:
+                    response_data = GLOBAL_DATA_STORE["data"]
             
-            def get_openvpn():
-                status_outputs, port_map = self._get_all_openvpn_statuses()
-                return self._extract_openvpn_sessions(status_outputs, port_map, detailed_users)
-
-            def get_l2tp():
-                return self._extract_l2tp_sessions(detailed_users)
-
-            def get_cisco():
-                return self._extract_cisco_sessions(detailed_users)
-
-            def get_wireguard():
-                return self._extract_wg_sessions(detailed_users)
-
-            with ThreadPoolExecutor(max_workers=4) as executor:
-                future_ovpn = executor.submit(get_openvpn)
-                future_l2tp = executor.submit(get_l2tp)
-                future_cisco = executor.submit(get_cisco)
-                future_wg = executor.submit(get_wireguard)
-
-                sessions.extend(future_ovpn.result() or [])
-                sessions.extend(future_l2tp.result() or [])
-                sessions.extend(future_cisco.result() or [])
-                sessions.extend(future_wg.result() or [])
-
-            aggregated = self._build_aggregated(detailed_users)
-
-            self._send_json(
-                200,
-                {
+            if not response_data:
+                cpu, ram, disk = self._get_system_stats()
+                response_data = {
                     "cpu": cpu,
                     "ram": ram,
                     "disk": disk,
-                    "sessions": sessions,
-                    "detailed": detailed_users,
-                    "aggregated": aggregated,
-                    "wireguard": {"iface": WG1_IFACE, "public_key": self._wg1_get_iface_public_key(), "listen_port": self._wg1_get_listen_port()},
-                    "services": self._services_status(),
-                    "openvpn_ports": self._get_openvpn_port_map(),
-                },
-            )
+                    "status": "initializing"
+                }
+
+            self._send_json(200, response_data)
         except Exception as e:
             try:
                 self.send_error(500, str(e))
@@ -1860,7 +1885,74 @@ class StatusHandler(BaseHTTPRequestHandler):
             except:
                 pass
 
+def background_monitor_engine():
+    dummy_handler = StatusHandler(None, None, None, run_setup=False)
+    
+    while True:
+        start_ts = time.time()
+        try:
+            cpu, ram, disk = dummy_handler._get_system_stats()
+
+            detailed_users = {}
+            sessions = []
+
+            def get_openvpn():
+                status_outputs, port_map = dummy_handler._get_all_openvpn_statuses()
+                return dummy_handler._extract_openvpn_sessions(status_outputs, port_map, detailed_users)
+
+            def get_l2tp():
+                return dummy_handler._extract_l2tp_sessions(detailed_users)
+
+            def get_cisco():
+                return dummy_handler._extract_cisco_sessions(detailed_users)
+
+            def get_wireguard():
+                return dummy_handler._extract_wg_sessions(detailed_users)
+
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                f_ovpn = executor.submit(get_openvpn)
+                f_l2tp = executor.submit(get_l2tp)
+                f_cisco = executor.submit(get_cisco)
+                f_wg = executor.submit(get_wireguard)
+
+                sessions.extend(f_ovpn.result() or [])
+                sessions.extend(f_l2tp.result() or [])
+                sessions.extend(f_cisco.result() or [])
+                sessions.extend(f_wg.result() or [])
+
+            aggregated = dummy_handler._build_aggregated(detailed_users)
+
+            final_data = {
+                "cpu": cpu,
+                "ram": ram,
+                "disk": disk,
+                "sessions": sessions,
+                "detailed": detailed_users,
+                "aggregated": aggregated,
+                "wireguard": {
+                    "iface": WG1_IFACE,
+                    "public_key": dummy_handler._wg1_get_iface_public_key(),
+                    "listen_port": dummy_handler._wg1_get_listen_port()
+                },
+                "services": dummy_handler._services_status(),
+                "openvpn_ports": dummy_handler._get_openvpn_port_map(),
+                "timestamp": time.time()
+            }
+
+            with GLOBAL_DATA_STORE["lock"]:
+                GLOBAL_DATA_STORE["data"] = final_data
+
+        except Exception as e:
+            print(f"Monitor Error: {e}", flush=True)
+
+        elapsed = time.time() - start_ts
+        sleep_time = max(0.2, 0.5 - elapsed)
+        time.sleep(sleep_time)
+
 def run_server():
+    monitor_thread = threading.Thread(target=background_monitor_engine, daemon=True)
+    monitor_thread.start()
+
     server = ThreadingHTTPServer(("0.0.0.0", PORT), StatusHandler)
     server.serve_forever()
 
