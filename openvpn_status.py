@@ -99,7 +99,7 @@ class StatusHandler(BaseHTTPRequestHandler):
 
     def _wg1_get_iface_public_key(self):
         try:
-            proc = subprocess.run(["wg", "show", WG1_IFACE, "public-key"], capture_output=True, text=True, check=False)
+            proc = subprocess.run(["wg", "show", WG1_IFACE, "public-key"], capture_output=True, text=True, check=False, timeout=5)
             pk = (proc.stdout or "").strip()
             if pk:
                 return pk
@@ -119,7 +119,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                                 priv = parts[1].strip()
                                 if priv:
                                     p2 = subprocess.run(["wg", "pubkey"], input=(priv + "\n").encode("utf-8"),
-                                                        capture_output=True, check=False)
+                                                        capture_output=True, check=False, timeout=5)
                                     pk2 = (p2.stdout or b"").decode("utf-8", "ignore").strip()
                                     if pk2:
                                         return pk2
@@ -129,7 +129,7 @@ class StatusHandler(BaseHTTPRequestHandler):
 
     def _wg1_get_listen_port(self):
         try:
-            proc = subprocess.run(["wg", "show", WG1_IFACE, "listen-port"], capture_output=True, text=True, check=False)
+            proc = subprocess.run(["wg", "show", WG1_IFACE, "listen-port"], capture_output=True, text=True, check=False, timeout=5)
             p = (proc.stdout or "").strip()
             if p.isdigit():
                 return int(p)
@@ -181,11 +181,13 @@ class StatusHandler(BaseHTTPRequestHandler):
                     pass
                 sock.sendall(b"status 2\n")
                 data = b""
-                while b"END" not in data:
+                limit = 0
+                while b"END" not in data and limit < 100:
                     chunk = sock.recv(4096)
                     if not chunk:
                         break
                     data += chunk
+                    limit += 1
                 return data.decode("utf-8", errors="ignore")
         except:
             return ""
@@ -233,7 +235,7 @@ class StatusHandler(BaseHTTPRequestHandler):
             futures = {ex.submit(self._get_status_from_management_port, "127.0.0.1", p): p for p in ports}
             for fut, p in futures.items():
                 try:
-                    res = fut.result()
+                    res = fut.result(timeout=5)
                     if res:
                         results[p] = res
                 except:
@@ -458,7 +460,7 @@ class StatusHandler(BaseHTTPRequestHandler):
         if not os.path.exists(OCCTL_BIN):
             return sessions
         try:
-            res = subprocess.run([OCCTL_BIN, "-j", "show", "users"], capture_output=True, text=True)
+            res = subprocess.run([OCCTL_BIN, "-j", "show", "users"], capture_output=True, text=True, timeout=5)
             if res.returncode != 0:
                 return sessions
             users = json.loads(res.stdout or "[]")
@@ -601,6 +603,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                 check=False,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                timeout=5
             )
             return True
         except:
@@ -688,7 +691,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                 tmp_psk.close()
                 cmd += ["preshared-key", tmp_psk.name]
 
-            cp = subprocess.run(cmd, check=False, capture_output=True, text=True)
+            cp = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=5)
             return cp.returncode == 0
         finally:
             if tmp_psk is not None:
@@ -706,6 +709,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                 check=False,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                timeout=5
             )
             return True
         except:
@@ -768,7 +772,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                 pass
 
         try:
-            res = subprocess.run(["wg", "show", WG1_IFACE, "dump"], capture_output=True, text=True)
+            res = subprocess.run(["wg", "show", WG1_IFACE, "dump"], capture_output=True, text=True, timeout=5)
             if res.returncode != 0:
                 return sessions
 
@@ -983,7 +987,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                     salt = os.urandom(8).hex()
                     chk = subprocess.check_output(
                         ["openssl", "passwd", "-6", "-salt", salt, passw], 
-                        stderr=subprocess.DEVNULL
+                        stderr=subprocess.DEVNULL, timeout=5
                     ).decode().strip()
                     hashed_pw = f"{uname}:*:{chk}"
                 except:
@@ -1020,9 +1024,9 @@ class StatusHandler(BaseHTTPRequestHandler):
                 finally:
                     fcntl.flock(f, fcntl.LOCK_UN)
 
-            subprocess.run(["occtl", "reload"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["occtl", "reload"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
             
-            subprocess.run(["pkill", "-HUP", "ocserv-main"], check=False)
+            subprocess.run(["pkill", "-HUP", "ocserv-main"], check=False, timeout=5)
 
             return True, f"Cisco {action} done via OpenSSL"
 
@@ -1031,21 +1035,22 @@ class StatusHandler(BaseHTTPRequestHandler):
 
     def _update_iptables_port(self, port):
         p = str(int(port))
-        subprocess.run(f"iptables -D INPUT -p tcp --dport {p} -j ACCEPT || true", shell=True, check=False)
-        subprocess.run(f"iptables -D INPUT -p udp --dport {p} -j ACCEPT || true", shell=True, check=False)
-        subprocess.run(f"iptables -I INPUT -p tcp --dport {p} -j ACCEPT", shell=True, check=False)
-        subprocess.run(f"iptables -I INPUT -p udp --dport {p} -j ACCEPT", shell=True, check=False)
+        subprocess.run(f"iptables -D INPUT -p tcp --dport {p} -j ACCEPT 2>/dev/null || true", shell=True, check=False, timeout=5)
+        subprocess.run(f"iptables -D INPUT -p udp --dport {p} -j ACCEPT 2>/dev/null || true", shell=True, check=False, timeout=5)
+        subprocess.run(f"iptables -I INPUT -p tcp --dport {p} -j ACCEPT", shell=True, check=False, timeout=5)
+        subprocess.run(f"iptables -I INPUT -p udp --dport {p} -j ACCEPT", shell=True, check=False, timeout=5)
 
     def _restart_openvpn_units(self):
         list_units = subprocess.run(
             ["systemctl", "list-units", "--type=service", "--state=running", "openvpn-server@*", "--no-legend"],
             capture_output=True,
             text=True,
+            timeout=5
         )
         for line in (list_units.stdout or "").splitlines():
             unit_name = (line.split() or [""])[0].strip()
             if unit_name:
-                subprocess.run(["systemctl", "restart", unit_name], check=False)
+                subprocess.run(["systemctl", "restart", unit_name], check=False, timeout=5)
 
     def _systemctl_state(self, unit_name):
         try:
@@ -1312,7 +1317,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                             subprocess.run(["sed", "-i", f"s/^tcp-port.*/tcp-port = {p}/", OCSERV_CONF], check=False)
                             subprocess.run(["sed", "-i", f"s/^udp-port.*/udp-port = {p}/", OCSERV_CONF], check=False)
                         self._update_iptables_port(p)
-                        subprocess.run(["systemctl", "restart", "ocserv"], check=False)
+                        subprocess.run(["systemctl", "restart", "ocserv"], check=False, timeout=5)
                         self._send_json(200, {"success": True})
                         return
 
@@ -1383,7 +1388,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                             if os.path.exists(OCSERV_CONF):
                                 subprocess.run(["sed", "-i", f"s/^tcp-port.*/tcp-port = {p}/", OCSERV_CONF], check=False)
                                 subprocess.run(["sed", "-i", f"s/^udp-port.*/udp-port = {p}/", OCSERV_CONF], check=False)
-                            subprocess.run(["systemctl", "restart", "ocserv"], check=False)
+                            subprocess.run(["systemctl", "restart", "ocserv"], check=False, timeout=5)
                             success, msg = True, "Cisco Config Updated"
                         else:
                             success, msg = False, "Missing port"
@@ -1653,7 +1658,7 @@ class StatusHandler(BaseHTTPRequestHandler):
 
                             if remove_unknown:
                                 try:
-                                    r = subprocess.run(["wg", "show", WG1_IFACE, "peers"], capture_output=True, text=True)
+                                    r = subprocess.run(["wg", "show", WG1_IFACE, "peers"], capture_output=True, text=True, timeout=5)
                                     if r.returncode == 0:
                                         for pub in (r.stdout or "").split():
                                             if pub and pub not in desired_pubs:
@@ -1699,7 +1704,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                         if sid:
                             try:
                                 if "Cisco" in proto:
-                                    subprocess.run([OCCTL_BIN, "disconnect", "id", str(sid)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                    subprocess.run([OCCTL_BIN, "disconnect", "id", str(sid)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
                                     success = True
                                     msg = "Killed Cisco ID"
                                 elif "L2TP" in proto:
@@ -1728,12 +1733,12 @@ class StatusHandler(BaseHTTPRequestHandler):
 
                         if not success and uname:
                             try:
-                                subprocess.run(["pkill", "-9", "-f", f"pppd.*name {uname}"], check=False)
+                                subprocess.run(["pkill", "-9", "-f", f"pppd.*name {uname}"], check=False, timeout=5)
                             except: pass
 
                             try:
                                 if os.path.exists(OCCTL_BIN):
-                                    subprocess.run([OCCTL_BIN, "disconnect", "user", str(uname)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                    subprocess.run([OCCTL_BIN, "disconnect", "user", str(uname)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
                             except: pass
 
                             try:
@@ -1794,12 +1799,12 @@ class StatusHandler(BaseHTTPRequestHandler):
                             except:
                                 pass
                             try:
-                                subprocess.run(["pkill", "-9", "-f", f"pppd.*name {uname}"], check=False)
+                                subprocess.run(["pkill", "-9", "-f", f"pppd.*name {uname}"], check=False, timeout=5)
                             except:
                                 pass
                             try:
                                 if os.path.exists(OCCTL_BIN):
-                                    subprocess.run([OCCTL_BIN, "disconnect", "user", str(uname)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                    subprocess.run([OCCTL_BIN, "disconnect", "user", str(uname)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
                             except:
                                 pass
                             try:
@@ -1836,7 +1841,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                                 subprocess.run(["sed", "-i", f"s/^tcp-port.*/tcp-port = {p}/", OCSERV_CONF], check=False)
                                 subprocess.run(["sed", "-i", f"s/^udp-port.*/udp-port = {p}/", OCSERV_CONF], check=False)
                             self._update_iptables_port(p)
-                            subprocess.run(["systemctl", "restart", "ocserv"], check=False)
+                            subprocess.run(["systemctl", "restart", "ocserv"], check=False, timeout=5)
                             success, msg = True, "Cisco Port Updated"
                         else:
                             success, msg = False, "Missing port"
@@ -1854,7 +1859,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                                 pass
                             try:
                                 if shutil.which("ufw"):
-                                    subprocess.run(["ufw", "allow", f"{p_int}/udp"], check=False, capture_output=True)
+                                    subprocess.run(["ufw", "allow", f"{p_int}/udp"], check=False, capture_output=True, timeout=5)
                             except:
                                 pass
 
@@ -1887,6 +1892,7 @@ class StatusHandler(BaseHTTPRequestHandler):
 
 def background_monitor_engine():
     dummy_handler = StatusHandler(None, None, None, run_setup=False)
+    executor = ThreadPoolExecutor(max_workers=8)
     
     while True:
         start_ts = time.time()
@@ -1909,18 +1915,17 @@ def background_monitor_engine():
             def get_wireguard():
                 return dummy_handler._extract_wg_sessions(detailed_users)
 
-            with ThreadPoolExecutor(max_workers=8) as executor:
-                f_ovpn = executor.submit(get_openvpn)
-                f_l2tp = executor.submit(get_l2tp)
-                f_cisco = executor.submit(get_cisco)
-                f_wg = executor.submit(get_wireguard)
+            f_ovpn = executor.submit(get_openvpn)
+            f_l2tp = executor.submit(get_l2tp)
+            f_cisco = executor.submit(get_cisco)
+            f_wg = executor.submit(get_wireguard)
 
-                sessions.extend(f_ovpn.result() or [])
-                sessions.extend(f_l2tp.result() or [])
-                sessions.extend(f_cisco.result() or [])
-                sessions.extend(f_wg.result() or [])
+            sessions.extend(f_ovpn.result() or [])
+            sessions.extend(f_l2tp.result() or [])
+            sessions.extend(f_cisco.result() or [])
+            sessions.extend(f_wg.result() or [])
 
-            aggregated = dummy_handler._build_aggregated(detailed_users)
+            aggregated = dummy_handler._build_aggregated(detailed_users.copy())
 
             final_data = {
                 "cpu": cpu,
