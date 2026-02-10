@@ -1951,7 +1951,7 @@ def background_monitor_engine():
             print(f"Monitor Error: {e}", flush=True)
 
         elapsed = time.time() - start_ts
-        sleep_time = max(0.2, 0.5 - elapsed)
+        sleep_time = max(1.0, 3.0 - elapsed)
         time.sleep(sleep_time)
 
 def run_server():
