@@ -509,7 +509,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                 current_mtime = os.stat(WG1_PEERS_DB).st_mtime
                 
                 if WG1_DB_CACHE and current_mtime == WG1_DB_LAST_MTIME:
-                    return WG1_DB_CACHE
+                    return WG1_DB_CACHE.copy()
 
                 with open(WG1_PEERS_DB, "r", encoding="utf-8") as f:
                     raw = f.read()
@@ -524,7 +524,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                 WG1_DB_CACHE = data
                 WG1_DB_LAST_MTIME = current_mtime
                 
-                return data
+                return data.copy() if isinstance(data, dict) else {}
             except Exception as e:
                 global WG1_DB_LAST_ERR_LOG
                 now = time.time()
