@@ -44,6 +44,8 @@ WG1_DB_LAST_MTIME = 0
 
 L2TP_SESSION_CACHE = {}
 L2TP_CACHE_LOCK = threading.Lock()
+DETAILED_LOCK = threading.Lock()
+
 
 GLOBAL_DATA_STORE = {
     "data": None,
@@ -227,6 +229,11 @@ class StatusHandler(BaseHTTPRequestHandler):
             port_map[7505] = {"proto": "UDP", "port": "1194"}
         return port_map
 
+
+
+
+
+
     def _get_all_openvpn_statuses(self):
         ports = self._get_all_management_ports()
         port_map = self._get_openvpn_port_map()
@@ -239,7 +246,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                     if res:
                         results[p] = res
                 except:
-                    pass
+                    continue
         return results, port_map
 
     def _extract_openvpn_sessions(self, status_outputs, port_map, detailed_users):
@@ -261,7 +268,6 @@ class StatusHandler(BaseHTTPRequestHandler):
                     v_ip = parts[3]
                     rx = int(parts[5])
                     tx = int(parts[6])
-
                     c_time = 0
                     found_time = False
                     if len(parts) > 8 and parts[8].isdigit() and len(parts[8]) >= 10:
@@ -275,37 +281,39 @@ class StatusHandler(BaseHTTPRequestHandler):
                             if p.isdigit() and len(p) >= 10 and (p.startswith("16") or p.startswith("17") or p.startswith("18") or p.startswith("19") or p.startswith("20")):
                                 c_time = int(p)
                                 break
-
                     cid = None
                     if len(parts) > 10 and parts[10].isdigit():
                         cid = int(parts[10])
                     elif len(parts) > 9 and parts[9].isdigit():
                         cid = int(parts[9])
-
-                    sessions.append(
-                        {
-                            "username": uname,
-                            "protocol": f"OpenVPN ({p_info.get('proto', 'UDP')})",
-                            "ip": real_ip,
-                            "v_ip": v_ip,
-                            "bytes_received": rx,
-                            "bytes_sent": tx,
-                            "connected_at": c_time,
-                            "session_id": cid,
-                            "mgmt_port": mgmt_port,
-                        }
-                    )
-
-                    if uname not in detailed_users:
-                        detailed_users[uname] = {}
-                    if legacy_key not in detailed_users[uname]:
-                        detailed_users[uname][legacy_key] = {"active": 0, "bytes_received": 0, "bytes_sent": 0}
-                    detailed_users[uname][legacy_key]["active"] += 1
-                    detailed_users[uname][legacy_key]["bytes_received"] += rx
-                    detailed_users[uname][legacy_key]["bytes_sent"] += tx
+                    sessions.append({
+                        "username": uname,
+                        "protocol": f"OpenVPN ({p_info.get('proto', 'UDP')})",
+                        "ip": real_ip,
+                        "v_ip": v_ip,
+                        "bytes_received": rx,
+                        "bytes_sent": tx,
+                        "connected_at": c_time,
+                        "session_id": cid,
+                        "mgmt_port": mgmt_port,
+                    })
+                    with DETAILED_LOCK:
+                        if uname not in detailed_users:
+                            detailed_users[uname] = {}
+                        if legacy_key not in detailed_users[uname]:
+                            detailed_users[uname][legacy_key] = {"active": 0, "bytes_received": 0, "bytes_sent": 0}
+                        detailed_users[uname][legacy_key]["active"] += 1
+                        detailed_users[uname][legacy_key]["bytes_received"] += rx
+                        detailed_users[uname][legacy_key]["bytes_sent"] += tx
                 except:
                     pass
         return sessions
+
+
+
+
+
+
 
     def _extract_l2tp_sessions(self, detailed_users):
         global L2TP_SESSION_CACHE, L2TP_CACHE_LOCK
@@ -419,15 +427,20 @@ class StatusHandler(BaseHTTPRequestHandler):
                     })
 
                     legacy_key = "L2TP/IPsec"
-                    if username not in detailed_users: detailed_users[username] = {}
-                    if legacy_key not in detailed_users[username]:
-                        detailed_users[username][legacy_key] = {"active": 0, "bytes_received": 0, "bytes_sent": 0}
-                    
-                    detailed_users[username][legacy_key]["active"] += 1
-                    detailed_users[username][legacy_key]["bytes_received"] += rx
-                    detailed_users[username][legacy_key]["bytes_sent"] += tx
+                    with DETAILED_LOCK:
+                        if username not in detailed_users: detailed_users[username] = {}
+                        if legacy_key not in detailed_users[username]:
+                            detailed_users[username][legacy_key] = {"active": 0, "bytes_received": 0, "bytes_sent": 0}
+                        
+                        detailed_users[username][legacy_key]["active"] += 1
+                        detailed_users[username][legacy_key]["bytes_received"] += rx
+                        detailed_users[username][legacy_key]["bytes_sent"] += tx
 
         return sessions
+
+
+
+
 
     def _parse_time_str_to_epoch(self, s, fallback_epoch):
         if not s:
@@ -453,6 +466,13 @@ class StatusHandler(BaseHTTPRequestHandler):
             return fallback_epoch
         except:
             return fallback_epoch
+
+
+
+
+
+
+
 
     def _extract_cisco_sessions(self, detailed_users):
         sessions = []
@@ -488,16 +508,20 @@ class StatusHandler(BaseHTTPRequestHandler):
                 )
 
                 legacy_key = "Cisco AnyConnect"
-                if uname not in detailed_users:
-                    detailed_users[uname] = {}
-                if legacy_key not in detailed_users[uname]:
-                    detailed_users[uname][legacy_key] = {"active": 0, "bytes_received": 0, "bytes_sent": 0}
-                detailed_users[uname][legacy_key]["active"] += 1
-                detailed_users[uname][legacy_key]["bytes_received"] += rx
-                detailed_users[uname][legacy_key]["bytes_sent"] += tx
+                with DETAILED_LOCK:
+                    if uname not in detailed_users:
+                        detailed_users[uname] = {}
+                    if legacy_key not in detailed_users[uname]:
+                        detailed_users[uname][legacy_key] = {"active": 0, "bytes_received": 0, "bytes_sent": 0}
+                    detailed_users[uname][legacy_key]["active"] += 1
+                    detailed_users[uname][legacy_key]["bytes_received"] += rx
+                    detailed_users[uname][legacy_key]["bytes_sent"] += tx
         except:
             pass
         return sessions
+
+
+
 
     def _wg1_load_peers_db(self):
         global WG1_DB_CACHE, WG1_DB_LAST_MTIME
@@ -752,6 +776,14 @@ class StatusHandler(BaseHTTPRequestHandler):
 
         return True
 
+
+
+
+
+
+
+
+
     def _extract_wg_sessions(self, detailed_users):
         sessions = []
         peers_map = self._wg1_load_peers_db()
@@ -875,17 +907,25 @@ class StatusHandler(BaseHTTPRequestHandler):
                     sessions.append(wg_entry)
 
                 if online:
-                    if username not in detailed_users:
-                        detailed_users[username] = {}
-                    if "WireGuard" not in detailed_users[username]:
-                        detailed_users[username]["WireGuard"] = {"active": 0, "bytes_received": 0, "bytes_sent": 0}
-                    detailed_users[username]["WireGuard"]["active"] += 1
-                    detailed_users[username]["WireGuard"]["bytes_received"] += rx
-                    detailed_users[username]["WireGuard"]["bytes_sent"] += tx
+                    with DETAILED_LOCK:
+                        if username not in detailed_users:
+                            detailed_users[username] = {}
+                        if "WireGuard" not in detailed_users[username]:
+                            detailed_users[username]["WireGuard"] = {"active": 0, "bytes_received": 0, "bytes_sent": 0}
+                        detailed_users[username]["WireGuard"]["active"] += 1
+                        detailed_users[username]["WireGuard"]["bytes_received"] += rx
+                        detailed_users[username]["WireGuard"]["bytes_sent"] += tx
         except:
             pass
 
         return sessions
+
+
+
+
+
+
+
 
     def _build_aggregated(self, detailed_users):
         aggregated = {}
@@ -1920,12 +1960,17 @@ def background_monitor_engine():
             f_cisco = executor.submit(get_cisco)
             f_wg = executor.submit(get_wireguard)
 
+
+
+
             sessions.extend(f_ovpn.result() or [])
             sessions.extend(f_l2tp.result() or [])
             sessions.extend(f_cisco.result() or [])
             sessions.extend(f_wg.result() or [])
 
-            aggregated = dummy_handler._build_aggregated(detailed_users.copy())
+            with DETAILED_LOCK:
+                aggregated = dummy_handler._build_aggregated(detailed_users)
+                detailed_users_snapshot = detailed_users.copy()
 
             final_data = {
                 "cpu": cpu,
