@@ -1401,6 +1401,7 @@ class StatusHandler(BaseHTTPRequestHandler):
 
             results = []
             for item in commands:
+                time.sleep(0.01)
                 try:
                     cmd = item.get("command")
                     uname = item.get("username")
