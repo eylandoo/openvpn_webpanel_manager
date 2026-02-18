@@ -1931,6 +1931,10 @@ class StatusHandler(BaseHTTPRequestHandler):
             except:
                 pass
 
+
+
+
+
 def background_monitor_engine():
     dummy_handler = StatusHandler(None, None, None, run_setup=False)
     executor = ThreadPoolExecutor(max_workers=8)
@@ -1940,45 +1944,43 @@ def background_monitor_engine():
         try:
             cpu, ram, disk = dummy_handler._get_system_stats()
 
-            detailed_users = {}
+            local_detailed = {}
             sessions = []
 
             def get_openvpn():
                 status_outputs, port_map = dummy_handler._get_all_openvpn_statuses()
-                return dummy_handler._extract_openvpn_sessions(status_outputs, port_map, detailed_users)
+                return dummy_handler._extract_openvpn_sessions(status_outputs, port_map, local_detailed)
 
             def get_l2tp():
-                return dummy_handler._extract_l2tp_sessions(detailed_users)
+                return dummy_handler._extract_l2tp_sessions(local_detailed)
 
             def get_cisco():
-                return dummy_handler._extract_cisco_sessions(detailed_users)
+                return dummy_handler._extract_cisco_sessions(local_detailed)
 
             def get_wireguard():
-                return dummy_handler._extract_wg_sessions(detailed_users)
+                return dummy_handler._extract_wg_sessions(local_detailed)
 
             f_ovpn = executor.submit(get_openvpn)
             f_l2tp = executor.submit(get_l2tp)
             f_cisco = executor.submit(get_cisco)
             f_wg = executor.submit(get_wireguard)
 
+            try:
+                sessions.extend(f_ovpn.result(timeout=10) or [])
+                sessions.extend(f_l2tp.result(timeout=10) or [])
+                sessions.extend(f_cisco.result(timeout=10) or [])
+                sessions.extend(f_wg.result(timeout=10) or [])
+            except:
+                pass
 
-
-
-            sessions.extend(f_ovpn.result() or [])
-            sessions.extend(f_l2tp.result() or [])
-            sessions.extend(f_cisco.result() or [])
-            sessions.extend(f_wg.result() or [])
-
-            with DETAILED_LOCK:
-                aggregated = dummy_handler._build_aggregated(detailed_users)
-                detailed_users_snapshot = detailed_users.copy()
+            aggregated = dummy_handler._build_aggregated(local_detailed)
 
             final_data = {
                 "cpu": cpu,
                 "ram": ram,
                 "disk": disk,
                 "sessions": sessions,
-                "detailed": detailed_users,
+                "detailed": local_detailed,
                 "aggregated": aggregated,
                 "wireguard": {
                     "iface": WG1_IFACE,
@@ -1993,12 +1995,15 @@ def background_monitor_engine():
             with GLOBAL_DATA_STORE["lock"]:
                 GLOBAL_DATA_STORE["data"] = final_data
 
-        except Exception as e:
-            print(f"Monitor Error: {e}", flush=True)
+        except:
+            pass
 
         elapsed = time.time() - start_ts
-        sleep_time = max(1.0, 3.0 - elapsed)
-        time.sleep(sleep_time)
+        time.sleep(max(1.0, 10.0 - elapsed))
+
+
+
+
 
 def run_server():
     monitor_thread = threading.Thread(target=background_monitor_engine, daemon=True)
