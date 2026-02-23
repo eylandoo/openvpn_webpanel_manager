@@ -13,7 +13,6 @@ WG_PUB="${WG_DIR}/${WG_IFACE}_publickey"
 WG_PEERS_DB="${WG_DIR}/${WG_IFACE}_peers.json"
 
 log() { echo -e "[WG1] $*"; }
-
 die() { echo -e "[WG1][ERR] $*" >&2; exit 1; }
 
 need_root() {
@@ -24,12 +23,23 @@ need_root() {
 
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
 
+wait_for_apt_lock() {
+  while fuser /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1; do
+    log "Waiting for other apt/dpkg processes to release locks..."
+    sleep 3
+  done
+}
+
 pkg_install() {
   if have_cmd apt-get; then
+    wait_for_apt_lock
     export DEBIAN_FRONTEND=noninteractive
+    
+    echo iptables-persistent iptables-persistent/autosave_v4 boolean true | debconf-set-selections
+    echo iptables-persistent iptables-persistent/autosave_v6 boolean true | debconf-set-selections
+    
     apt-get update -y
-    apt-get install -y --no-install-recommends wireguard wireguard-tools iproute2 iptables
-    apt-get install -y --no-install-recommends iptables-persistent netfilter-persistent || true
+    apt-get install -y --no-install-recommends wireguard wireguard-tools iproute2 iptables iptables-persistent netfilter-persistent
   elif have_cmd dnf; then
     dnf -y install wireguard-tools iproute iptables || true
   elif have_cmd yum; then
@@ -37,8 +47,11 @@ pkg_install() {
   elif have_cmd apk; then
     apk add --no-cache wireguard-tools iproute2 iptables || true
   else
-    die "No supported package manager found (apt/dnf/yum/apk). Install wireguard-tools manually."
+    die "No supported package manager found. Install wireguard-tools manually."
   fi
+
+  hash -r
+  modprobe wireguard 2>/dev/null || true
 }
 
 detect_public_iface() {
@@ -77,7 +90,6 @@ gen_keys_if_missing() {
 
 write_peers_db_if_missing() {
   if [[ -f "${WG_PEERS_DB}" ]]; then
-    chmod 600 "${WG_PEERS_DB}" || true
     return 0
   fi
   log "Creating empty peers DB: ${WG_PEERS_DB}"
@@ -98,9 +110,8 @@ ListenPort = ${WG1_PORT}
 PrivateKey = $(cat "${WG_PRIV}")
 SaveConfig = false
 
-
-PostUp = ip route add 10.201.0.0/16 dev %i 2>/dev/null || true; iptables -t nat -I POSTROUTING 1 -s 10.201.0.0/16 -o ${pub_iface} -j MASQUERADE
-PostDown = ip route del 10.201.0.0/16 dev %i 2>/dev/null || true; iptables -t nat -D POSTROUTING -s 10.201.0.0/16 -o ${pub_iface} -j MASQUERADE
+PostUp = iptables -t nat -I POSTROUTING 1 -s 10.201.0.0/16 -o ${pub_iface} -j MASQUERADE
+PostDown = iptables -t nat -D POSTROUTING -s 10.201.0.0/16 -o ${pub_iface} -j MASQUERADE
 EOF
 
   chmod 600 "${WG_BASE}" || true
@@ -111,10 +122,8 @@ ensure_conf_exists() {
     log "Creating initial ${WG_CONF} from base..."
     cp -f "${WG_BASE}" "${WG_CONF}"
     echo "" >> "${WG_CONF}"
-    chmod 600 "${WG_CONF}" || true
-  else
-    chmod 600 "${WG_CONF}" || true
   fi
+  chmod 600 "${WG_CONF}" || true
 }
 
 open_firewall() {
@@ -129,8 +138,6 @@ open_firewall() {
 
   if have_cmd netfilter-persistent; then
     netfilter-persistent save >/dev/null 2>&1 || true
-  elif have_cmd service; then
-    service netfilter-persistent save >/dev/null 2>&1 || true
   fi
 }
 
@@ -142,7 +149,7 @@ start_service() {
   if systemctl is-active --quiet "wg-quick@${WG_IFACE}"; then
     log "Service is active."
   else
-    log "Service is not active yet (this can be OK if panel overwrites wg1.conf shortly)."
+    log "Service is not active yet."
     log "Check logs: journalctl -u wg-quick@${WG_IFACE} --no-pager | tail -n 80"
   fi
 }
