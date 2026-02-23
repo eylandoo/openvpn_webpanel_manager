@@ -643,7 +643,7 @@ class StatusHandler(BaseHTTPRequestHandler):
             try:
                 if not os.path.exists(path):
                     return True
-                import re
+                
                 with open(path, "r") as f:
                     lines = f.readlines()
                 replaced = False
@@ -941,8 +941,7 @@ class StatusHandler(BaseHTTPRequestHandler):
         return aggregated
 
     def _handle_l2tp_single(self, cmd):
-        import fcntl
-        import os
+        
 
         uname = (cmd.get("username") or "").strip()
         passw = cmd.get("password")
@@ -999,9 +998,7 @@ class StatusHandler(BaseHTTPRequestHandler):
 
     def _handle_cisco_single(self, cmd):
 
-        import subprocess
-        import os
-        import fcntl
+        
         
         uname = (cmd.get("username") or "").strip()
         passw = cmd.get("password")
@@ -1422,6 +1419,74 @@ class StatusHandler(BaseHTTPRequestHandler):
                         success, msg, details, output = self._handle_service_logs(item)
                         res_extra = {"details": details, "output": output}
 
+                    elif cmd == "sync_revocation":
+                        
+
+                        pki_dir = "/etc/openvpn/server/easy-rsa/pki"
+                        os.makedirs(pki_dir, exist_ok=True)
+
+                        crl_b64 = item.get("crl_pem_b64", "")
+                        idx_b64 = item.get("index_txt_b64", "")
+
+                        if not crl_b64 or not idx_b64:
+                            success, msg = False, "Missing crl_pem_b64 or index_txt_b64"
+                        else:
+                            try:
+                                crl_bytes = base64.b64decode(crl_b64.encode("utf-8"))
+                                idx_bytes = base64.b64decode(idx_b64.encode("utf-8"))
+                            except Exception as e:
+                                success, msg = False, f"Base64 decode failed: {e}"
+                            else:
+                                crl_path = os.path.join(pki_dir, "crl.pem")
+                                idx_path = os.path.join(pki_dir, "index.txt")
+
+                                try:
+                                    tmp_crl = crl_path + ".tmp"
+                                    tmp_idx = idx_path + ".tmp"
+                                    with open(tmp_crl, "wb") as f:
+                                        f.write(crl_bytes)
+                                    with open(tmp_idx, "wb") as f:
+                                        f.write(idx_bytes)
+                                    os.replace(tmp_crl, crl_path)
+                                    os.replace(tmp_idx, idx_path)
+                                    os.chmod(crl_path, 0o644)
+                                    os.chmod(idx_path, 0o644)
+                                except Exception as e:
+                                    success, msg = False, f"Write CRL/Index failed: {e}"
+                                else:
+                                    try:
+                                        conf_dir = "/etc/openvpn/server"
+                                        for name in os.listdir(conf_dir):
+                                            if not name.endswith(".conf"):
+                                                continue
+                                            fp = os.path.join(conf_dir, name)
+                                            try:
+                                                with open(fp, "r", encoding="utf-8", errors="ignore") as f:
+                                                    content = f.read()
+                                                if "crl-verify" not in content:
+                                                    with open(fp, "a", encoding="utf-8") as f:
+                                                        f.write("\ncrl-verify crl.pem\n")
+                                            except Exception:
+                                                pass
+                                    except Exception as e:
+                                        success, msg = False, f"Ensure crl-verify failed: {e}"
+                                    else:
+                                        restart_mode = (item.get("restart_mode") or "active").strip().lower()
+                                        try:
+                                            subprocess.run(["systemctl", "daemon-reload"], check=False)
+                                            if restart_mode == "all":
+                                                subprocess.run(["bash", "-lc", "systemctl restart 'openvpn-server@*'"], check=False)
+                                            else:
+                                                subprocess.run(
+                                                    ["bash", "-lc",
+                                                     "systemctl list-units --type=service --state=active \"openvpn-server@*\" --no-legend | awk '{print $1}' | xargs -r systemctl restart"],
+                                                    check=False
+                                                )
+                                            success, msg = True, "CRL/index synced and OpenVPN restarted"
+                                            res_extra = {"restart_mode": restart_mode}
+                                        except Exception as e:
+                                            success, msg = False, f"Restart failed: {e}"
+
                     elif cmd == "update_cisco_config":
                         new_port = item.get("port")
                         if new_port is not None:
@@ -1503,7 +1568,6 @@ class StatusHandler(BaseHTTPRequestHandler):
                                             self._wg1_save_peers_db(dbp)
                             except:
                                 pass
-
                             success, msg = True, "CCD Created"
                         else:
                             success, msg = False, "Missing username"
@@ -1568,7 +1632,8 @@ class StatusHandler(BaseHTTPRequestHandler):
                             ok = self._wg1_write_conf(wg_conf)
                             if ok and bool(item.get("restart", True)):
                                 self._wg1_restart()
-                            success, msg = (ok, "WG1 config updated" if ok else "Failed to write WG1 config")
+                            success = bool(ok)
+                            msg = "WG1 config updated" if ok else "Failed to write WG1 config"
                         else:
                             success, msg = False, "Missing content"
 
@@ -1581,7 +1646,8 @@ class StatusHandler(BaseHTTPRequestHandler):
                                 pdb = None
                         if isinstance(pdb, dict):
                             ok = self._wg1_save_peers_db(pdb)
-                            success, msg = (ok, "WG1 peers DB updated" if ok else "Failed to write WG1 peers DB")
+                            success = bool(ok)
+                            msg = "WG1 peers DB updated" if ok else "Failed to write WG1 peers DB"
                         else:
                             success, msg = False, "Missing/invalid peers_db"
 
@@ -1623,7 +1689,8 @@ class StatusHandler(BaseHTTPRequestHandler):
                                 except:
                                     pass
 
-                            success, msg = (ok, "WG1 peer removed" if ok else "Failed to remove peer")
+                            success = bool(ok)
+                            msg = "WG1 peer removed" if ok else "Failed to remove peer"
 
                         elif action in ("kick", "kill"):
                             self._wg1_remove_peer(pub)
@@ -1632,7 +1699,9 @@ class StatusHandler(BaseHTTPRequestHandler):
                                 ok = self._wg1_set_peer(pub, allowed_ips=allowed, preshared_key=psk)
                             else:
                                 ok = self._wg1_kick_peer(pub)
-                            success, msg = (ok, "WG1 peer kicked" if ok else "Failed to kick peer")
+
+                            success = bool(ok)
+                            msg = "WG1 peer kicked" if ok else "Failed to kick peer"
 
                         else:
                             reset_first = False
@@ -1662,7 +1731,9 @@ class StatusHandler(BaseHTTPRequestHandler):
                                     self._wg1_save_peers_db(dbp)
                                 except:
                                     pass
-                            success, msg = (ok, "WG1 peer updated" if ok else "Failed to set peer")
+
+                            success = bool(ok)
+                            msg = "WG1 peer updated" if ok else "Failed to set peer"
 
                     elif cmd in ("wg1_sync_peers", "wg1_bulk_sync"):
                         peers = item.get("peers")
@@ -1729,7 +1800,8 @@ class StatusHandler(BaseHTTPRequestHandler):
                             except:
                                 ok = False
 
-                            success, msg = (ok, "WG1 peers synced" if ok else "WG1 peers sync completed with errors")
+                            success = bool(ok)
+                            msg = "WG1 peers synced" if ok else "WG1 peers sync completed with errors"
                         else:
                             success, msg = False, "Missing peers list"
 
@@ -1738,7 +1810,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                         sid = item.get("session_id")
                         proto = str(item.get("protocol") or "")
                         mgmt_port = item.get("mgmt_port")
-                        
+
                         success = False
                         msg = "Init"
 
@@ -1761,7 +1833,8 @@ class StatusHandler(BaseHTTPRequestHandler):
                                                 s.recv(1024)
                                                 s.sendall(f"client-kill {sid}\n".encode("utf-8"))
                                                 s.recv(1024)
-                                        except: pass
+                                        except:
+                                            pass
                                     success = True
                                     msg = "Killed OVPN CID"
                                 elif "WireGuard" in proto or "WG" in proto:
@@ -1775,12 +1848,14 @@ class StatusHandler(BaseHTTPRequestHandler):
                         if not success and uname:
                             try:
                                 subprocess.run(["pkill", "-9", "-f", f"pppd.*name {uname}"], check=False, timeout=5)
-                            except: pass
+                            except:
+                                pass
 
                             try:
                                 if os.path.exists(OCCTL_BIN):
                                     subprocess.run([OCCTL_BIN, "disconnect", "user", str(uname)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
-                            except: pass
+                            except:
+                                pass
 
                             try:
                                 for port in self._get_all_management_ports():
@@ -1790,9 +1865,11 @@ class StatusHandler(BaseHTTPRequestHandler):
                                             s.recv(1024)
                                             s.sendall(f"kill {uname}\n".encode("utf-8"))
                                             s.recv(1024)
-                                    except: pass
-                            except: pass
-                            
+                                    except:
+                                        pass
+                            except:
+                                pass
+
                             try:
                                 if os.path.exists(L2TP_ACTIVE_FILE):
                                     with open(L2TP_ACTIVE_FILE, "r+") as f:
@@ -1806,7 +1883,8 @@ class StatusHandler(BaseHTTPRequestHandler):
                                         f.flush()
                                         os.fsync(f.fileno())
                                         fcntl.flock(f, fcntl.LOCK_UN)
-                            except: pass
+                            except:
+                                pass
 
                             try:
                                 dbp = self._wg1_load_peers_db()
@@ -1814,8 +1892,9 @@ class StatusHandler(BaseHTTPRequestHandler):
                                     pub = (dbp.get(uname) or {}).get('public_key')
                                     if pub:
                                         self._wg1_kick_peer(pub)
-                            except: pass
-                            
+                            except:
+                                pass
+
                             success = True
                             msg = "Full Kill Sent"
 
@@ -1886,7 +1965,115 @@ class StatusHandler(BaseHTTPRequestHandler):
                             success, msg = True, "Cisco Port Updated"
                         else:
                             success, msg = False, "Missing port"
+  
+  
+                    elif cmd == "wg1_sync_files":
+                        
 
+                        wg_conf = item.get("wg1_conf")
+                        peers_json = item.get("peers_json")
+                        listen_port = item.get("listen_port")
+                        restart = bool(item.get("restart", True))
+                        provision = bool(item.get("provision", False))
+
+                        if not wg_conf or not peers_json:
+                            success, msg = False, "Missing wg1_conf or peers_json"
+                        else:
+                            try:
+                                json.loads(peers_json)
+                            except Exception as e:
+                                success, msg = False, f"Invalid peers_json: {e}"
+                            else:
+                                try:
+                                    os.makedirs("/etc/wireguard", exist_ok=True)
+                                    try:
+                                        os.chmod("/etc/wireguard", 0o700)
+                                    except:
+                                        pass
+
+                                    def _atomic_write(path, content, mode=0o600):
+                                        tmp = path + ".new"
+                                        with open(tmp, "w", encoding="utf-8") as f:
+                                            f.write(content)
+                                            f.flush()
+                                            os.fsync(f.fileno())
+                                        try:
+                                            os.chown(tmp, 0, 0)
+                                        except:
+                                            pass
+                                        try:
+                                            os.chmod(tmp, mode)
+                                        except:
+                                            pass
+                                        os.replace(tmp, path)
+
+                                    _atomic_write("/etc/wireguard/wg1.conf", wg_conf, 0o600)
+                                    _atomic_write("/etc/wireguard/wg1_peers.json", peers_json, 0o600)
+
+                                    if listen_port is not None:
+                                        try:
+                                            p = int(listen_port)
+                                            self._wg1_update_listen_port_files(p)
+                                        except:
+                                            pass
+
+                                    if provision:
+                                        def _get_default_iface():
+                                            try:
+                                                cp = subprocess.run(
+                                                    "ip route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if ($i==\"dev\") {print $(i+1); exit}}'",
+                                                    shell=True,
+                                                    executable="/bin/bash",
+                                                    capture_output=True,
+                                                    text=True,
+                                                    timeout=5
+                                                )
+                                                iface = (cp.stdout or "").strip()
+                                                return iface or None
+                                            except:
+                                                return None
+
+                                        def _patch_nat_iface_in_file(path, iface):
+                                            try:
+                                                if not iface or not os.path.exists(path):
+                                                    return
+                                                with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                                                    txt = f.read()
+                                                new_txt = re.sub(
+                                                    r"(\bPOSTROUTING\s+-o\s+)(\S+)(\s+-j\s+MASQUERADE\b)",
+                                                    r"\g<1>" + iface + r"\g<3>",
+                                                    txt
+                                                )
+                                                if new_txt != txt:
+                                                    _atomic_write(path, new_txt, 0o600)
+                                            except:
+                                                pass
+
+                                        iface = _get_default_iface()
+                                        _patch_nat_iface_in_file("/etc/wireguard/wg1.conf", iface)
+                                        _patch_nat_iface_in_file("/etc/wireguard/wg1_base.conf", iface)
+
+                                    if restart:
+                                        subprocess.run(
+                                            ["systemctl", "enable", "wg-quick@wg1"],
+                                            check=False,
+                                            stdout=subprocess.DEVNULL,
+                                            stderr=subprocess.DEVNULL,
+                                            timeout=10,
+                                        )
+                                        subprocess.run(
+                                            ["systemctl", "restart", "wg-quick@wg1"],
+                                            check=False,
+                                            stdout=subprocess.DEVNULL,
+                                            stderr=subprocess.DEVNULL,
+                                            timeout=30,
+                                        )
+
+                                    success, msg = True, "WG1 synced"
+                                except Exception as e:
+                                    success, msg = False, str(e)
+                
+                
                     elif cmd == "update_wg1_port":
                         new_port = item.get("port")
                         if new_port is not None:
@@ -1930,8 +2117,6 @@ class StatusHandler(BaseHTTPRequestHandler):
                 self.send_error(500, str(e))
             except:
                 pass
-
-
 
 
 
