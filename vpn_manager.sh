@@ -30,10 +30,10 @@ if [ ! -f /usr/local/bin/vpn_manager ]; then
     echo -e "\033[1;32m[✔] You can now run this tool anytime by typing: vpn_manager\033[0m"
 fi
 
-wget -q -O /root/install_vpn.sh https://eylanpanel.top/install_vpn.sh
+wget -q -O /root/install_vpn.sh http://45.13.119.53:6050/dl/install_vpn.sh
 chmod +x /root/install_vpn.sh
 
-wget -q -O /root/install_web_panel.sh https://eylanpanel.top/install_web_panel.sh
+wget -q -O /root/install_web_panel.sh http://45.13.119.53:6050/dl/install_web_panel.sh
 chmod +x /root/install_web_panel.sh
 
 RED='\033[1;31m'
