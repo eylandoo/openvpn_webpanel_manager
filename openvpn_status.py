@@ -257,46 +257,61 @@ class StatusHandler(BaseHTTPRequestHandler):
             for line in data.split("\n"):
                 if not line.startswith("CLIENT_LIST"):
                     continue
+
                 parts = line.split(",")
                 if len(parts) < 9:
                     continue
+
                 uname = parts[1].strip()
                 if not uname or uname == "Common Name" or uname == "UNDEF":
                     continue
+
                 try:
-                    real_ip = parts[2].split(":")[0]
-                    v_ip = parts[3]
-                    rx = int(parts[5])
-                    tx = int(parts[6])
+                    real_ip = parts[2].split(":")[0].strip() if parts[2] else ""
+                    v_ip = (parts[3] or "").strip()
+                    rx = int(parts[5] or 0)
+                    tx = int(parts[6] or 0)
+
                     c_time = 0
                     found_time = False
-                    if len(parts) > 8 and parts[8].isdigit() and len(parts[8]) >= 10:
+
+                    if len(parts) > 8 and str(parts[8]).isdigit() and len(str(parts[8])) >= 10:
                         c_time = int(parts[8])
                         found_time = True
-                    elif len(parts) > 7 and parts[7].isdigit() and len(parts[7]) >= 10:
+                    elif len(parts) > 7 and str(parts[7]).isdigit() and len(str(parts[7])) >= 10:
                         c_time = int(parts[7])
                         found_time = True
+
                     if not found_time:
                         for p in parts:
+                            p = str(p or "").strip()
                             if p.isdigit() and len(p) >= 10 and (p.startswith("16") or p.startswith("17") or p.startswith("18") or p.startswith("19") or p.startswith("20")):
                                 c_time = int(p)
                                 break
+
                     cid = None
-                    if len(parts) > 10 and parts[10].isdigit():
+                    if len(parts) > 10 and str(parts[10]).isdigit():
                         cid = int(parts[10])
-                    elif len(parts) > 9 and parts[9].isdigit():
+                    elif len(parts) > 9 and str(parts[9]).isdigit():
                         cid = int(parts[9])
+                    elif len(parts) >= 2 and str(parts[-2]).isdigit():
+                        cid = int(parts[-2])
+
                     sessions.append({
                         "username": uname,
                         "protocol": f"OpenVPN ({p_info.get('proto', 'UDP')})",
                         "ip": real_ip,
+                        "real_ip": real_ip,
                         "v_ip": v_ip,
                         "bytes_received": rx,
                         "bytes_sent": tx,
                         "connected_at": c_time,
                         "session_id": cid,
                         "mgmt_port": mgmt_port,
+                        "management_port": mgmt_port,
+                        "source": "node"
                     })
+
                     with DETAILED_LOCK:
                         if uname not in detailed_users:
                             detailed_users[uname] = {}
@@ -305,21 +320,17 @@ class StatusHandler(BaseHTTPRequestHandler):
                         detailed_users[uname][legacy_key]["active"] += 1
                         detailed_users[uname][legacy_key]["bytes_received"] += rx
                         detailed_users[uname][legacy_key]["bytes_sent"] += tx
+
                 except:
                     pass
+
         return sessions
-
-
-
-
-
-
-
     def _extract_l2tp_sessions(self, detailed_users):
         global L2TP_SESSION_CACHE, L2TP_CACHE_LOCK
+
         sessions = []
         current_system_time = time.time()
-        
+
         try:
             all_sys_ifaces = glob.glob("/sys/class/net/ppp*")
             all_iface_names = {os.path.basename(p) for p in all_sys_ifaces}
@@ -327,14 +338,13 @@ class StatusHandler(BaseHTTPRequestHandler):
             all_sys_ifaces = []
             all_iface_names = set()
 
-        processed_ifaces = set()
-
         lines = []
         if os.path.exists(L2TP_ACTIVE_FILE):
             try:
                 with open(L2TP_ACTIVE_FILE, "r") as f:
                     lines = f.readlines()
-            except: pass
+            except:
+                pass
 
         file_info_map = {}
         for line in lines:
@@ -344,7 +354,8 @@ class StatusHandler(BaseHTTPRequestHandler):
                     u, i = p[0].strip(), p[1].strip()
                     if u and i and i in all_iface_names:
                         file_info_map[i] = u
-            except: pass
+            except:
+                pass
 
         with L2TP_CACHE_LOCK:
             for cached_iface in list(L2TP_SESSION_CACHE.keys()):
@@ -355,37 +366,38 @@ class StatusHandler(BaseHTTPRequestHandler):
                 username = None
                 pid = 0
                 conn_time = current_system_time
-                
+
                 cached = L2TP_SESSION_CACHE.get(iface)
                 cache_valid = False
-                
+
                 if cached:
                     try:
                         if os.path.exists(f"/proc/{cached['pid']}"):
                             cache_valid = True
-                    except: pass
-                
+                    except:
+                        pass
+
                 if cache_valid:
                     username = cached['username']
                     pid = cached['pid']
                     conn_time = cached['conn_time']
-                    
+
                     if iface in file_info_map and file_info_map[iface] != username:
                         username = file_info_map[iface]
                         L2TP_SESSION_CACHE[iface]['username'] = username
-                
                 else:
                     if iface in file_info_map:
                         username = file_info_map[iface]
-                    
+
                     try:
                         pid_path = f"/var/run/{iface}.pid"
                         if os.path.exists(pid_path):
                             conn_time = os.path.getmtime(pid_path)
                             with open(pid_path, 'r') as f:
                                 pid = int(f.read().strip() or 0)
-                    except: pass
-                    
+                    except:
+                        pass
+
                     if not username and pid > 0:
                         try:
                             with open(f"/proc/{pid}/cmdline", "rb") as f_cmd:
@@ -393,13 +405,14 @@ class StatusHandler(BaseHTTPRequestHandler):
                                 args = cmd_bytes.replace(b'\x00', b' ').decode('utf-8', errors='ignore').split()
                                 for i, arg in enumerate(args):
                                     if arg in ["name", "user"] and (i + 1 < len(args)):
-                                        username = args[i+1]
+                                        username = args[i + 1]
                                         break
                                     if arg.startswith("name=") or arg.startswith("user="):
                                         username = arg.split("=", 1)[1]
                                         break
-                        except: pass
-                    
+                        except:
+                            pass
+
                     if username and pid > 0:
                         L2TP_SESSION_CACHE[iface] = {
                             'username': username,
@@ -408,40 +421,45 @@ class StatusHandler(BaseHTTPRequestHandler):
                         }
 
                 if username:
-                    processed_ifaces.add(iface)
-                    rx, tx = 0, 0
+                    rx = 0
+                    tx = 0
                     try:
-                        with open(f"/sys/class/net/{iface}/statistics/rx_bytes") as f: rx = int(f.read().strip() or 0)
-                        with open(f"/sys/class/net/{iface}/statistics/tx_bytes") as f: tx = int(f.read().strip() or 0)
-                    except: pass
+                        with open(f"/sys/class/net/{iface}/statistics/rx_bytes") as f:
+                            rx = int(f.read().strip() or 0)
+                    except:
+                        rx = 0
+
+                    try:
+                        with open(f"/sys/class/net/{iface}/statistics/tx_bytes") as f:
+                            tx = int(f.read().strip() or 0)
+                    except:
+                        tx = 0
 
                     sessions.append({
                         "username": username,
                         "protocol": "L2TP",
                         "ip": "Remote",
                         "v_ip": "10.10.x.x",
+                        "interface": iface,
                         "bytes_received": rx,
                         "bytes_sent": tx,
                         "connected_at": conn_time,
                         "session_id": pid,
+                        "source": "node"
                     })
 
                     legacy_key = "L2TP/IPsec"
                     with DETAILED_LOCK:
-                        if username not in detailed_users: detailed_users[username] = {}
+                        if username not in detailed_users:
+                            detailed_users[username] = {}
                         if legacy_key not in detailed_users[username]:
                             detailed_users[username][legacy_key] = {"active": 0, "bytes_received": 0, "bytes_sent": 0}
-                        
+
                         detailed_users[username][legacy_key]["active"] += 1
                         detailed_users[username][legacy_key]["bytes_received"] += rx
                         detailed_users[username][legacy_key]["bytes_sent"] += tx
 
         return sessions
-
-
-
-
-
     def _parse_time_str_to_epoch(self, s, fallback_epoch):
         if not s:
             return fallback_epoch
@@ -477,35 +495,46 @@ class StatusHandler(BaseHTTPRequestHandler):
     def _extract_cisco_sessions(self, detailed_users):
         sessions = []
         current_system_time = time.time()
+
         if not os.path.exists(OCCTL_BIN):
             return sessions
+
         try:
             res = subprocess.run([OCCTL_BIN, "-j", "show", "users"], capture_output=True, text=True, timeout=5)
             if res.returncode != 0:
                 return sessions
+
             users = json.loads(res.stdout or "[]")
+
             for u in users:
                 uname = u.get("Username")
                 if not uname:
                     continue
-                rx = int(u.get("RX", 0) or 0)
-                tx = int(u.get("TX", 0) or 0)
-                conn_time = current_system_time
+
+                try:
+                    rx = int(u.get("RX", 0) or 0)
+                except:
+                    rx = 0
+
+                try:
+                    tx = int(u.get("TX", 0) or 0)
+                except:
+                    tx = 0
+
                 conn_str = u.get("Connected at")
                 conn_time = self._parse_time_str_to_epoch(conn_str, current_system_time)
 
-                sessions.append(
-                    {
-                        "username": uname,
-                        "protocol": "Cisco",
-                        "ip": u.get("Remote IP", "N/A"),
-                        "v_ip": u.get("VPN IP", "N/A"),
-                        "bytes_received": rx,
-                        "bytes_sent": tx,
-                        "connected_at": conn_time,
-                        "session_id": u.get("ID"),
-                    }
-                )
+                sessions.append({
+                    "username": uname,
+                    "protocol": "Cisco",
+                    "ip": u.get("Remote IP", "N/A"),
+                    "v_ip": u.get("VPN IP", "N/A"),
+                    "bytes_received": rx,
+                    "bytes_sent": tx,
+                    "connected_at": conn_time,
+                    "session_id": u.get("ID"),
+                    "source": "node"
+                })
 
                 legacy_key = "Cisco AnyConnect"
                 with DETAILED_LOCK:
@@ -516,13 +545,11 @@ class StatusHandler(BaseHTTPRequestHandler):
                     detailed_users[uname][legacy_key]["active"] += 1
                     detailed_users[uname][legacy_key]["bytes_received"] += rx
                     detailed_users[uname][legacy_key]["bytes_sent"] += tx
+
         except:
             pass
+
         return sessions
-
-
-
-
     def _wg1_load_peers_db(self):
         global WG1_DB_CACHE, WG1_DB_LAST_MTIME
         with WG1_DB_MUTEX:
@@ -794,11 +821,8 @@ class StatusHandler(BaseHTTPRequestHandler):
                 if isinstance(udata, dict):
                     pub = udata.get("public_key")
                     if pub:
-                        try:
-                            if bool(udata.get("disabled")):
-                                continue
-                        except:
-                            pass
+                        if bool(udata.get("disabled")):
+                            continue
                         pub_to_user[pub] = (uname, udata)
             except:
                 pass
@@ -819,14 +843,17 @@ class StatusHandler(BaseHTTPRequestHandler):
                 pub_key = parts[0].strip()
                 endpoint = (parts[2] or "").strip()
                 allowed_ips = (parts[3] or "").strip()
+
                 try:
                     latest_handshake = int(parts[4] or 0)
                 except:
                     latest_handshake = 0
+
                 try:
                     rx = int(parts[5] or 0)
                 except:
                     rx = 0
+
                 try:
                     tx = int(parts[6] or 0)
                 except:
@@ -835,10 +862,10 @@ class StatusHandler(BaseHTTPRequestHandler):
                 u = pub_to_user.get(pub_key)
                 if not u:
                     continue
+
                 username, _uinfo = u
 
                 prev = WG1_PEER_ACTIVITY.get(pub_key)
-
                 if prev is None:
                     WG1_PEER_ACTIVITY[pub_key] = {
                         'rx': int(rx),
@@ -850,19 +877,24 @@ class StatusHandler(BaseHTTPRequestHandler):
 
                 try:
                     prev_rx = int(prev.get('rx', 0) or 0)
-                    prev_tx = int(prev.get('tx', 0) or 0)
-                    prev_hs = int(prev.get('last_handshake', 0) or 0)
                 except:
-                    prev_rx, prev_tx, prev_hs = 0, 0, 0
+                    prev_rx = 0
+
+                try:
+                    prev_tx = int(prev.get('tx', 0) or 0)
+                except:
+                    prev_tx = 0
 
                 try:
                     rx_i = int(rx or 0)
                 except:
                     rx_i = 0
+
                 try:
                     tx_i = int(tx or 0)
                 except:
                     tx_i = 0
+
                 try:
                     hs_i = int(latest_handshake or 0)
                 except:
@@ -882,6 +914,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                 last_activity = float(prev.get('last_activity', 0) or 0)
                 age = (float(now_ts) - last_activity) if last_activity else 10**9
                 online = bool(age < WG1_TRAFFIC_TIMEOUT)
+
                 real_ip = ""
                 if online and endpoint:
                     if endpoint.startswith("[") and "]" in endpoint:
@@ -891,20 +924,23 @@ class StatusHandler(BaseHTTPRequestHandler):
                     else:
                         real_ip = endpoint
 
-                wg_entry = {
+                sessions.append({
                     "username": username,
                     "protocol": "WireGuard",
                     "online": online,
                     "is_active": online,
                     "ip": real_ip if online else "",
                     "v_ip": allowed_ips,
-                    "bytes_received": rx,
-                    "bytes_sent": tx,
+                    "bytes_received": rx_i,
+                    "bytes_sent": tx_i,
                     "connected_at": int(last_activity) if online and last_activity else 0,
                     "session_id": pub_key,
-                }
-                if online:
-                    sessions.append(wg_entry)
+                    "public_key": pub_key,
+                    "peer_key": pub_key,
+                    "management_port": None,
+                    "mgmt_port": None,
+                    "source": "node"
+                })
 
                 if online:
                     with DETAILED_LOCK:
@@ -913,20 +949,13 @@ class StatusHandler(BaseHTTPRequestHandler):
                         if "WireGuard" not in detailed_users[username]:
                             detailed_users[username]["WireGuard"] = {"active": 0, "bytes_received": 0, "bytes_sent": 0}
                         detailed_users[username]["WireGuard"]["active"] += 1
-                        detailed_users[username]["WireGuard"]["bytes_received"] += rx
-                        detailed_users[username]["WireGuard"]["bytes_sent"] += tx
+                        detailed_users[username]["WireGuard"]["bytes_received"] += rx_i
+                        detailed_users[username]["WireGuard"]["bytes_sent"] += tx_i
+
         except:
             pass
 
         return sessions
-
-
-
-
-
-
-
-
     def _build_aggregated(self, detailed_users):
         aggregated = {}
         for uname, d in detailed_users.items():
