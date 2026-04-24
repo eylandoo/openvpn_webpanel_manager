@@ -706,44 +706,269 @@ class StatusHandler(BaseHTTPRequestHandler):
         ok2 = _update_file(WG1_CONF)
         return ok1 and ok2
 
-    def _wg1_set_peer(self, pub_key, allowed_ips=None, preshared_key=None):
+    def _wg1_read_base_conf(self):
+        try:
+            if os.path.exists(WG1_BASE):
+                with open(WG1_BASE, "r", encoding="utf-8", errors="ignore") as f:
+                    txt = f.read().strip()
+                if txt:
+                    return txt + "\n\n"
+        except:
+            pass
+
+        try:
+            if os.path.exists(WG1_CONF):
+                with open(WG1_CONF, "r", encoding="utf-8", errors="ignore") as f:
+                    txt = f.read()
+                idx = txt.find("\n[Peer]")
+                if idx < 0:
+                    idx = txt.find("[Peer]")
+                base = txt[:idx].strip() if idx >= 0 else txt.strip()
+                if base:
+                    try:
+                        Path(os.path.dirname(WG1_BASE) or "/").mkdir(parents=True, exist_ok=True)
+                        tmp = WG1_BASE + ".tmp"
+                        with open(tmp, "w", encoding="utf-8") as f:
+                            f.write(base + "\n")
+                            f.flush()
+                            try:
+                                os.fsync(f.fileno())
+                            except:
+                                pass
+                        try:
+                            os.chmod(tmp, 0o600)
+                        except:
+                            pass
+                        os.replace(tmp, WG1_BASE)
+                    except:
+                        pass
+                    return base + "\n\n"
+        except:
+            pass
+
+        return "[Interface]\n"
+
+    def _wg1_rebuild_conf_from_peers_db(self):
+        try:
+            peers = self._wg1_load_peers_db()
+            if not isinstance(peers, dict):
+                return False
+
+            base = self._wg1_read_base_conf().rstrip() + "\n\n"
+            out = [base]
+
+            for uname, pdata in peers.items():
+                try:
+                    if not isinstance(pdata, dict):
+                        continue
+                    if bool(pdata.get("disabled")):
+                        continue
+                    pk = str(pdata.get("public_key") or "").strip()
+                    allowed = (
+                        pdata.get("allowed_ips")
+                        or pdata.get("allowed_ip")
+                        or pdata.get("allowed_ips_v4")
+                        or pdata.get("ip")
+                        or pdata.get("wg1_ip")
+                    )
+                    allowed_norm = self._wg1_normalize_allowed_ips(allowed)
+                    if not pk or not allowed_norm:
+                        continue
+                    out.append("[Peer]\n")
+                    out.append(f"PublicKey = {pk}\n")
+                    out.append(f"AllowedIPs = {allowed_norm}\n")
+                    psk = str(pdata.get("preshared_key") or "").strip()
+                    if psk:
+                        out.append(f"PresharedKey = {psk}\n")
+                    out.append("\n")
+                except:
+                    continue
+
+            Path(os.path.dirname(WG1_CONF) or "/").mkdir(parents=True, exist_ok=True)
+            tmp = WG1_CONF + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.writelines(out)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except:
+                    pass
+            try:
+                os.chmod(tmp, 0o600)
+            except:
+                pass
+            os.replace(tmp, WG1_CONF)
+            return True
+        except Exception as e:
+            try:
+                print(f"[WG1] rebuild config failed: {e}", flush=True)
+            except:
+                pass
+            return False
+    def _wg1_ensure_runtime(self):
+        try:
+            if not shutil.which("wg") or not shutil.which("wg-quick"):
+                return False, "wireguard tools missing"
+
+            try:
+                Path(os.path.dirname(WG1_CONF) or "/").mkdir(parents=True, exist_ok=True)
+            except:
+                pass
+
+            try:
+                if not os.path.exists(WG1_CONF):
+                    self._wg1_rebuild_conf_from_peers_db()
+            except:
+                pass
+
+            try:
+                subprocess.run(
+                    ["systemctl", "enable", f"wg-quick@{WG1_IFACE}"],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=10
+                )
+            except:
+                pass
+
+            for _ in range(2):
+                try:
+                    cp = subprocess.run(
+                        ["wg", "show", WG1_IFACE],
+                        check=False,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        timeout=5
+                    )
+                    if cp.returncode == 0:
+                        return True, "ok"
+                except:
+                    pass
+
+                try:
+                    subprocess.run(
+                        ["systemctl", "start", f"wg-quick@{WG1_IFACE}"],
+                        check=False,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=20
+                    )
+                except:
+                    pass
+
+            try:
+                cp2 = subprocess.run(
+                    ["wg", "show", WG1_IFACE],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=5
+                )
+                if cp2.returncode == 0:
+                    return True, "ok"
+                return False, (cp2.stderr or "wg interface not active").strip()
+            except Exception as e:
+                return False, str(e)
+        except Exception as e:
+            return False, str(e)
+
+    def _wg1_normalize_allowed_ips(self, allowed_ips):
+        if allowed_ips is None:
+            return None
+
+        try:
+            s = str(allowed_ips).strip()
+            if not s:
+                return None
+
+            parts = [p.strip() for p in re.split(r"[,\s]+", s) if p.strip()]
+            norm_parts = []
+
+            for p in parts:
+                if "/" not in p:
+                    if ":" in p:
+                        norm_parts.append(p + "/128")
+                    else:
+                        norm_parts.append(p + "/32")
+                else:
+                    norm_parts.append(p)
+
+            return ",".join(norm_parts) if norm_parts else None
+        except:
+            return str(allowed_ips).strip() if allowed_ips else None
+
+    def _wg1_set_peer(self, pub_key, allowed_ips=None, preshared_key=None, reset_first=False):
         if not pub_key:
             return False
 
-        allowed_norm = None
-        if allowed_ips:
-            try:
-                s = str(allowed_ips).strip()
-                if s:
-                    parts = [p.strip() for p in re.split(r"[,\s]+", s) if p.strip()]
-                    norm_parts = []
-                    for p in parts:
-                        if "/" not in p:
-                            if ":" in p:
-                                norm_parts.append(p + "/128")
-                            else:
-                                norm_parts.append(p + "/32")
-                        else:
-                            norm_parts.append(p)
-                    allowed_norm = ",".join(norm_parts) if norm_parts else None
-            except Exception:
-                allowed_norm = str(allowed_ips)
+        pub = str(pub_key).strip()
+        allowed_norm = self._wg1_normalize_allowed_ips(allowed_ips)
 
-        cmd = ["wg", "set", WG1_IFACE, "peer", str(pub_key).strip()]
-        if allowed_norm:
-            cmd += ["allowed-ips", allowed_norm]
+        ok_runtime, runtime_msg = self._wg1_ensure_runtime()
+        if not ok_runtime:
+            try:
+                print(f"[WG1] runtime unavailable before set peer: {runtime_msg}", flush=True)
+            except:
+                pass
+            return False
 
         tmp_psk = None
+
         try:
+            WG1_PEER_ACTIVITY.pop(pub, None)
+        except:
+            pass
+
+        try:
+            if reset_first:
+                subprocess.run(
+                    ["wg", "set", WG1_IFACE, "peer", pub, "remove"],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=10
+                )
+
+            cmd = ["wg", "set", WG1_IFACE, "peer", pub]
+            if allowed_norm:
+                cmd += ["allowed-ips", allowed_norm]
+
             if preshared_key:
                 tmp_psk = tempfile.NamedTemporaryFile(mode="w", delete=False)
                 tmp_psk.write(str(preshared_key).strip() + "\n")
                 tmp_psk.flush()
                 tmp_psk.close()
+                try:
+                    os.chmod(tmp_psk.name, 0o600)
+                except:
+                    pass
                 cmd += ["preshared-key", tmp_psk.name]
 
-            cp = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=5)
-            return cp.returncode == 0
+            cp = subprocess.run(
+                cmd,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+
+            if cp.returncode != 0:
+                try:
+                    print(f"[WG1] set peer failed: {cp.stderr.strip()}", flush=True)
+                except:
+                    pass
+                return False
+
+            return True
+        except Exception as e:
+            try:
+                print(f"[WG1] set peer exception: {e}", flush=True)
+            except:
+                pass
+            return False
         finally:
             if tmp_psk is not None:
                 try:
@@ -754,33 +979,46 @@ class StatusHandler(BaseHTTPRequestHandler):
     def _wg1_remove_peer(self, pub_key):
         if not pub_key:
             return False
+        pub = str(pub_key).strip()
         try:
-            subprocess.run(
-                ["wg", "set", WG1_IFACE, "peer", pub_key, "remove"],
+            WG1_PEER_ACTIVITY.pop(pub, None)
+        except:
+            pass
+        try:
+            ok_runtime, _runtime_msg = self._wg1_ensure_runtime()
+            if not ok_runtime:
+                return True
+            cp = subprocess.run(
+                ["wg", "set", WG1_IFACE, "peer", pub, "remove"],
                 check=False,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                timeout=5
+                timeout=10
             )
-            return True
+            return cp.returncode == 0
         except:
             return False
-
     def _wg1_kick_peer(self, pub_key):
         if not pub_key:
             return False
 
+        pub = str(pub_key).strip()
         db = self._wg1_load_peers_db()
         info = None
-        for u, d in (db or {}).items():
+        for _u, d in (db or {}).items():
             try:
-                if isinstance(d, dict) and d.get("public_key") == pub_key:
+                if isinstance(d, dict) and str(d.get("public_key") or "").strip() == pub:
                     info = d
                     break
             except:
                 pass
 
-        self._wg1_remove_peer(pub_key)
+        try:
+            WG1_PEER_ACTIVITY.pop(pub, None)
+        except:
+            pass
+
+        self._wg1_remove_peer(pub)
 
         if isinstance(info, dict):
             try:
@@ -789,7 +1027,6 @@ class StatusHandler(BaseHTTPRequestHandler):
             except:
                 pass
 
-        if isinstance(info, dict):
             allowed = (
                 info.get("allowed_ips")
                 or info.get("allowed_ip")
@@ -798,19 +1035,9 @@ class StatusHandler(BaseHTTPRequestHandler):
                 or info.get("wg1_ip")
             )
             psk = info.get("preshared_key")
-            self._wg1_set_peer(pub_key, allowed_ips=allowed, preshared_key=psk)
-            return True
+            return self._wg1_set_peer(pub, allowed_ips=allowed, preshared_key=psk, reset_first=False)
 
         return True
-
-
-
-
-
-
-
-
-
     def _extract_wg_sessions(self, detailed_users):
         sessions = []
         peers_map = self._wg1_load_peers_db()
@@ -864,59 +1091,66 @@ class StatusHandler(BaseHTTPRequestHandler):
                     continue
 
                 username, _uinfo = u
+                endpoint_present = bool(endpoint)
+                fresh_handshake = bool(latest_handshake > 0 and (now_ts - latest_handshake) <= 10)
 
                 prev = WG1_PEER_ACTIVITY.get(pub_key)
                 if prev is None:
                     WG1_PEER_ACTIVITY[pub_key] = {
-                        'rx': int(rx),
-                        'tx': int(tx),
-                        'last_activity': 0.0,
-                        'last_handshake': int(latest_handshake) if latest_handshake else 0
+                        "rx": rx,
+                        "tx": tx,
+                        "last_activity": float(now_ts) if (fresh_handshake and endpoint_present) else 0.0,
+                        "last_handshake": latest_handshake,
+                        "endpoint": endpoint,
                     }
                     prev = WG1_PEER_ACTIVITY[pub_key]
+                else:
+                    try:
+                        prev_rx = int(prev.get("rx", 0) or 0)
+                    except:
+                        prev_rx = 0
 
-                try:
-                    prev_rx = int(prev.get('rx', 0) or 0)
-                except:
-                    prev_rx = 0
+                    try:
+                        prev_tx = int(prev.get("tx", 0) or 0)
+                    except:
+                        prev_tx = 0
 
-                try:
-                    prev_tx = int(prev.get('tx', 0) or 0)
-                except:
-                    prev_tx = 0
+                    try:
+                        prev_hs = int(prev.get("last_handshake", 0) or 0)
+                    except:
+                        prev_hs = 0
 
-                try:
-                    rx_i = int(rx or 0)
-                except:
-                    rx_i = 0
+                    prev_ep = str(prev.get("endpoint") or "")
 
-                try:
-                    tx_i = int(tx or 0)
-                except:
-                    tx_i = 0
+                    counter_reset = (rx < prev_rx) or (tx < prev_tx)
+                    traffic_moved = rx > prev_rx
+                    handshake_moved = latest_handshake > prev_hs
+                    endpoint_changed = endpoint_present and endpoint != prev_ep
 
-                try:
-                    hs_i = int(latest_handshake or 0)
-                except:
-                    hs_i = 0
+                    if counter_reset:
+                        prev["rx"] = rx
+                        prev["tx"] = tx
+                        prev["last_handshake"] = latest_handshake
+                        prev["endpoint"] = endpoint
+                        prev["last_activity"] = float(now_ts) if (fresh_handshake and endpoint_present) else 0.0
+                    else:
+                        if traffic_moved or handshake_moved or endpoint_changed:
+                            prev["last_activity"] = float(now_ts)
 
-                activity = False
-                if rx_i > prev_rx:
-                    activity = True
+                        prev["rx"] = rx
+                        prev["tx"] = tx
+                        prev["last_handshake"] = latest_handshake
+                        prev["endpoint"] = endpoint
 
-                if activity:
-                    prev['last_activity'] = float(now_ts)
+                last_activity = float(prev.get("last_activity", 0) or 0)
+                recent_activity = bool(last_activity > 0 and (float(now_ts) - last_activity) <= 10)
+                online = bool(recent_activity or (fresh_handshake and endpoint_present))
 
-                prev['rx'] = rx_i
-                prev['tx'] = tx_i
-                prev['last_handshake'] = hs_i
-
-                last_activity = float(prev.get('last_activity', 0) or 0)
-                age = (float(now_ts) - last_activity) if last_activity else 10**9
-                online = bool(age < WG1_TRAFFIC_TIMEOUT)
+                if not online:
+                    continue
 
                 real_ip = ""
-                if online and endpoint:
+                if endpoint_present:
                     if endpoint.startswith("[") and "]" in endpoint:
                         real_ip = endpoint.split("]")[0].lstrip("[")
                     elif ":" in endpoint:
@@ -924,38 +1158,38 @@ class StatusHandler(BaseHTTPRequestHandler):
                     else:
                         real_ip = endpoint
 
-                sessions.append({
+                wg_entry = {
                     "username": username,
                     "protocol": "WireGuard",
-                    "online": online,
-                    "is_active": online,
-                    "ip": real_ip if online else "",
+                    "online": True,
+                    "is_active": True,
+                    "ip": real_ip,
                     "v_ip": allowed_ips,
-                    "bytes_received": rx_i,
-                    "bytes_sent": tx_i,
-                    "connected_at": int(last_activity) if online and last_activity else 0,
+                    "bytes_received": rx,
+                    "bytes_sent": tx,
+                    "connected_at": int(last_activity) if last_activity else (latest_handshake if latest_handshake else 0),
                     "session_id": pub_key,
                     "public_key": pub_key,
                     "peer_key": pub_key,
-                    "management_port": None,
-                    "mgmt_port": None,
-                    "source": "node"
-                })
+                    "source": "node",
+                }
 
-                if online:
-                    with DETAILED_LOCK:
-                        if username not in detailed_users:
-                            detailed_users[username] = {}
-                        if "WireGuard" not in detailed_users[username]:
-                            detailed_users[username]["WireGuard"] = {"active": 0, "bytes_received": 0, "bytes_sent": 0}
-                        detailed_users[username]["WireGuard"]["active"] += 1
-                        detailed_users[username]["WireGuard"]["bytes_received"] += rx_i
-                        detailed_users[username]["WireGuard"]["bytes_sent"] += tx_i
+                sessions.append(wg_entry)
+
+                with DETAILED_LOCK:
+                    if username not in detailed_users:
+                        detailed_users[username] = {}
+                    if "WireGuard" not in detailed_users[username]:
+                        detailed_users[username]["WireGuard"] = {"active": 0, "bytes_received": 0, "bytes_sent": 0}
+                    detailed_users[username]["WireGuard"]["active"] += 1
+                    detailed_users[username]["WireGuard"]["bytes_received"] += rx
+                    detailed_users[username]["WireGuard"]["bytes_sent"] += tx
 
         except:
             pass
 
         return sessions
+
     def _build_aggregated(self, detailed_users):
         aggregated = {}
         for uname, d in detailed_users.items():
@@ -1415,6 +1649,8 @@ class StatusHandler(BaseHTTPRequestHandler):
                         except:
                             pdb = None
                     ok = isinstance(pdb, dict) and self._wg1_save_peers_db(pdb)
+                    if ok:
+                        self._wg1_rebuild_conf_from_peers_db()
                     self._send_json(200, {"success": bool(ok)})
                     return
 
@@ -1586,7 +1822,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                                             self._wg1_remove_peer(pub)
                                         except:
                                             pass
-                                        ok_peer = self._wg1_set_peer(pub, allowed_ips=allowed, preshared_key=psk)
+                                        ok_peer = self._wg1_set_peer(pub, allowed_ips=allowed, preshared_key=psk, reset_first=False)
                                         if ok_peer:
                                             info["disabled"] = False
                                             try:
@@ -1675,94 +1911,123 @@ class StatusHandler(BaseHTTPRequestHandler):
                                 pdb = None
                         if isinstance(pdb, dict):
                             ok = self._wg1_save_peers_db(pdb)
+                            if ok:
+                                self._wg1_rebuild_conf_from_peers_db()
                             success = bool(ok)
                             msg = "WG1 peers DB updated" if ok else "Failed to write WG1 peers DB"
                         else:
                             success, msg = False, "Missing/invalid peers_db"
 
                     elif cmd in ("wg1_peer_action", "wg1_set_peer"):
-                        action = str(item.get("action") or "upsert").lower()
+                        action = str(item.get("action") or "add").strip().lower()
                         pub = item.get("public_key") or item.get("pub_key") or item.get("session_id")
-                        allowed = item.get("allowed_ips") or item.get("v_ip")
+                        allowed = (
+                            item.get("allowed_ips")
+                            or item.get("allowed_ip")
+                            or item.get("wg1_ip")
+                            or item.get("ip")
+                            or item.get("v_ip")
+                        )
                         psk = item.get("preshared_key")
                         uname_wg = (item.get("username") or "").strip()
 
+                        if action == "upsert":
+                            action = "add"
+                        if action == "remove":
+                            action = "delete"
+
                         dbp = self._wg1_load_peers_db()
+                        if not isinstance(dbp, dict):
+                            dbp = {}
 
-                        if action in ("remove", "delete"):
-                            ok = self._wg1_remove_peer(pub)
+                        if action == "delete":
+                            if not pub and uname_wg and isinstance(dbp.get(uname_wg), dict):
+                                pub = dbp.get(uname_wg, {}).get("public_key")
+                            if not allowed and uname_wg and isinstance(dbp.get(uname_wg), dict):
+                                allowed = dbp.get(uname_wg, {}).get("allowed_ips") or dbp.get(uname_wg, {}).get("allowed_ip")
 
-                            purge_db = False
+                            ok = True
+                            if pub:
+                                ok = self._wg1_remove_peer(str(pub).strip())
+
+                            purge_db = True
                             try:
-                                purge_db = bool(item.get("purge_db", False)) or (action == "delete")
+                                if "purge_db" in item:
+                                    purge_db = bool(item.get("purge_db"))
                             except:
-                                purge_db = (action == "delete")
+                                purge_db = True
 
                             if uname_wg:
-                                try:
-                                    if purge_db:
-                                        dbp.pop(uname_wg, None)
-                                    else:
-                                        if uname_wg not in dbp or not isinstance(dbp.get(uname_wg), dict):
-                                            if uname_wg in dbp and isinstance(dbp.get(uname_wg), str):
-                                                dbp[uname_wg] = {"public_key": dbp.get(uname_wg)}
-                                            else:
-                                                dbp[uname_wg] = {}
-                                        if isinstance(dbp.get(uname_wg), dict):
-                                            if pub:
-                                                dbp[uname_wg]["public_key"] = pub
-                                            if allowed:
-                                                dbp[uname_wg]["allowed_ips"] = allowed
-                                            dbp[uname_wg]["disabled"] = True
-                                    self._wg1_save_peers_db(dbp)
-                                except:
-                                    pass
+                                if purge_db:
+                                    dbp.pop(uname_wg, None)
+                                else:
+                                    if uname_wg not in dbp or not isinstance(dbp.get(uname_wg), dict):
+                                        dbp[uname_wg] = {}
+                                    if pub:
+                                        dbp[uname_wg]["public_key"] = str(pub).strip()
+                                    if allowed:
+                                        dbp[uname_wg]["allowed_ips"] = self._wg1_normalize_allowed_ips(allowed)
+                                    dbp[uname_wg]["disabled"] = True
+                                self._wg1_save_peers_db(dbp)
+                                self._wg1_rebuild_conf_from_peers_db()
 
                             success = bool(ok)
                             msg = "WG1 peer removed" if ok else "Failed to remove peer"
 
                         elif action in ("kick", "kill"):
-                            self._wg1_remove_peer(pub)
+                            if pub:
+                                self._wg1_remove_peer(str(pub).strip())
                             ok = True
-                            if allowed or psk:
-                                ok = self._wg1_set_peer(pub, allowed_ips=allowed, preshared_key=psk)
+                            if pub and (allowed or psk):
+                                ok = self._wg1_set_peer(str(pub).strip(), allowed_ips=allowed, preshared_key=psk, reset_first=True)
+                            elif pub:
+                                ok = self._wg1_kick_peer(str(pub).strip())
                             else:
-                                ok = self._wg1_kick_peer(pub)
+                                ok = False
 
                             success = bool(ok)
                             msg = "WG1 peer kicked" if ok else "Failed to kick peer"
 
                         else:
-                            reset_first = False
-                            try:
-                                reset_first = bool(item.get("reset_first", False)) or (action == "add")
-                            except:
-                                reset_first = (action == "add")
+                            if not pub and uname_wg and isinstance(dbp.get(uname_wg), dict):
+                                pub = dbp.get(uname_wg, {}).get("public_key")
+                            if not allowed and uname_wg and isinstance(dbp.get(uname_wg), dict):
+                                allowed = dbp.get(uname_wg, {}).get("allowed_ips") or dbp.get(uname_wg, {}).get("allowed_ip")
 
-                            if reset_first and pub:
+                            if not pub:
+                                success, msg = False, "Missing public_key"
+                            elif not allowed:
+                                success, msg = False, "Missing allowed_ips"
+                            else:
+                                reset_first = True
                                 try:
-                                    self._wg1_remove_peer(pub)
+                                    if "reset_first" in item:
+                                        reset_first = bool(item.get("reset_first"))
                                 except:
-                                    pass
+                                    reset_first = True
 
-                            ok = self._wg1_set_peer(pub, allowed_ips=allowed, preshared_key=psk)
+                                if reset_first:
+                                    try:
+                                        self._wg1_remove_peer(str(pub).strip())
+                                    except:
+                                        pass
 
-                            if ok and uname_wg and pub:
-                                try:
+                                ok = self._wg1_set_peer(str(pub).strip(), allowed_ips=allowed, preshared_key=psk, reset_first=True)
+
+                                if ok and uname_wg:
                                     if uname_wg not in dbp or not isinstance(dbp.get(uname_wg), dict):
                                         dbp[uname_wg] = {}
-                                    dbp[uname_wg]["public_key"] = pub
+                                    dbp[uname_wg]["public_key"] = str(pub).strip()
+                                    dbp[uname_wg]["allowed_ips"] = self._wg1_normalize_allowed_ips(allowed)
+                                    dbp[uname_wg]["allowed_ip"] = self._wg1_normalize_allowed_ips(allowed)
                                     dbp[uname_wg]["disabled"] = False
-                                    if allowed:
-                                        dbp[uname_wg]["allowed_ips"] = str(allowed).strip()
                                     if psk:
                                         dbp[uname_wg]["preshared_key"] = psk
                                     self._wg1_save_peers_db(dbp)
-                                except:
-                                    pass
+                                    self._wg1_rebuild_conf_from_peers_db()
 
-                            success = bool(ok)
-                            msg = "WG1 peer updated" if ok else "Failed to set peer"
+                                success = bool(ok)
+                                msg = "WG1 peer updated" if ok else "Failed to set peer"
 
                     elif cmd in ("wg1_sync_peers", "wg1_bulk_sync"):
                         peers = item.get("peers")
@@ -1782,7 +2047,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                                     if not pub:
                                         continue
                                     desired_pubs.add(pub)
-                                    self._wg1_set_peer(pub, allowed_ips=allowed, preshared_key=psk)
+                                    self._wg1_set_peer(pub, allowed_ips=allowed, preshared_key=psk, reset_first=False)
 
                                     if uname_p:
                                         if uname_p not in db or not isinstance(db.get(uname_p), dict):
@@ -2097,6 +2362,19 @@ class StatusHandler(BaseHTTPRequestHandler):
                                             stderr=subprocess.DEVNULL,
                                             timeout=30,
                                         )
+
+                                    try:
+                                        peers_after_sync = self._wg1_load_peers_db() or {}
+                                        self._wg1_ensure_runtime()
+                                        for _uname_sync, _pdata_sync in peers_after_sync.items():
+                                            if not isinstance(_pdata_sync, dict) or bool(_pdata_sync.get("disabled")):
+                                                continue
+                                            _pub_sync = _pdata_sync.get("public_key")
+                                            _allowed_sync = _pdata_sync.get("allowed_ips") or _pdata_sync.get("allowed_ip") or _pdata_sync.get("ip") or _pdata_sync.get("wg1_ip")
+                                            if _pub_sync and _allowed_sync:
+                                                self._wg1_set_peer(_pub_sync, allowed_ips=_allowed_sync, preshared_key=_pdata_sync.get("preshared_key"), reset_first=False)
+                                    except:
+                                        pass
 
                                     success, msg = True, "WG1 synced"
                                 except Exception as e:
