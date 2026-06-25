@@ -229,11 +229,6 @@ class StatusHandler(BaseHTTPRequestHandler):
             port_map[7505] = {"proto": "UDP", "port": "1194"}
         return port_map
 
-
-
-
-
-
     def _get_all_openvpn_statuses(self):
         ports = self._get_all_management_ports()
         port_map = self._get_openvpn_port_map()
@@ -325,6 +320,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                     pass
 
         return sessions
+
     def _extract_l2tp_sessions(self, detailed_users):
         global L2TP_SESSION_CACHE, L2TP_CACHE_LOCK
 
@@ -460,6 +456,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                         detailed_users[username][legacy_key]["bytes_sent"] += tx
 
         return sessions
+
     def _parse_time_str_to_epoch(self, s, fallback_epoch):
         if not s:
             return fallback_epoch
@@ -484,13 +481,6 @@ class StatusHandler(BaseHTTPRequestHandler):
             return fallback_epoch
         except:
             return fallback_epoch
-
-
-
-
-
-
-
 
     def _extract_cisco_sessions(self, detailed_users):
         sessions = []
@@ -550,31 +540,32 @@ class StatusHandler(BaseHTTPRequestHandler):
             pass
 
         return sessions
+
     def _wg1_load_peers_db(self):
         global WG1_DB_CACHE, WG1_DB_LAST_MTIME
         with WG1_DB_MUTEX:
             try:
                 if not os.path.exists(WG1_PEERS_DB):
                     return {}
-                
+
                 current_mtime = os.stat(WG1_PEERS_DB).st_mtime
-                
+
                 if WG1_DB_CACHE and current_mtime == WG1_DB_LAST_MTIME:
                     return WG1_DB_CACHE.copy()
 
                 with open(WG1_PEERS_DB, "r", encoding="utf-8") as f:
                     raw = f.read()
-                
+
                 if not raw.strip():
                     data = {}
                 else:
                     data = json.loads(raw)
-                
+
                 data = data if isinstance(data, dict) else {}
-                
+
                 WG1_DB_CACHE = data
                 WG1_DB_LAST_MTIME = current_mtime
-                
+
                 return data.copy() if isinstance(data, dict) else {}
             except Exception as e:
                 global WG1_DB_LAST_ERR_LOG
@@ -634,6 +625,10 @@ class StatusHandler(BaseHTTPRequestHandler):
 
     def _wg1_write_conf(self, content):
         try:
+            if os.path.exists(WG1_CONF):
+                with open(WG1_CONF, "r") as f:
+                    if f.read().strip() == (content or "").strip():
+                        return "NO_CHANGE"
             Path(os.path.dirname(WG1_CONF) or "/").mkdir(parents=True, exist_ok=True)
             tmp = WG1_CONF + ".tmp"
             with open(tmp, "w") as f:
@@ -649,13 +644,12 @@ class StatusHandler(BaseHTTPRequestHandler):
 
     def _wg1_restart(self):
         try:
-            subprocess.run(
-                ["systemctl", "restart", f"wg-quick@{WG1_IFACE}"],
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=5
-            )
+            cp = subprocess.run(["ip", "link", "show", WG1_IFACE], capture_output=True, text=True, timeout=5)
+            if cp.returncode == 0:
+                subprocess.run(f"wg syncconf {WG1_IFACE} <(wg-quick strip {WG1_IFACE})", 
+                               shell=True, executable="/bin/bash", check=False, timeout=10)
+                return True
+            subprocess.run(["systemctl", "restart", f"wg-quick@{WG1_IFACE}"], check=False, timeout=10)
             return True
         except:
             return False
@@ -670,7 +664,7 @@ class StatusHandler(BaseHTTPRequestHandler):
             try:
                 if not os.path.exists(path):
                     return True
-                
+
                 with open(path, "r") as f:
                     lines = f.readlines()
                 replaced = False
@@ -805,6 +799,7 @@ class StatusHandler(BaseHTTPRequestHandler):
             except:
                 pass
             return False
+
     def _wg1_ensure_runtime(self):
         try:
             if not shutil.which("wg") or not shutil.which("wg-quick"):
@@ -821,24 +816,11 @@ class StatusHandler(BaseHTTPRequestHandler):
             except:
                 pass
 
-            try:
-                subprocess.run(
-                    ["systemctl", "enable", f"wg-quick@{WG1_IFACE}"],
-                    check=False,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=10
-                )
-            except:
-                pass
-
             for _ in range(2):
                 try:
                     cp = subprocess.run(
                         ["wg", "show", WG1_IFACE],
-                        check=False,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.PIPE,
+                        capture_output=True,
                         text=True,
                         timeout=5
                     )
@@ -861,9 +843,7 @@ class StatusHandler(BaseHTTPRequestHandler):
             try:
                 cp2 = subprocess.run(
                     ["wg", "show", WG1_IFACE],
-                    check=False,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
+                    capture_output=True,
                     text=True,
                     timeout=5
                 )
@@ -998,6 +978,7 @@ class StatusHandler(BaseHTTPRequestHandler):
             return cp.returncode == 0
         except:
             return False
+
     def _wg1_kick_peer(self, pub_key):
         if not pub_key:
             return False
@@ -1038,6 +1019,7 @@ class StatusHandler(BaseHTTPRequestHandler):
             return self._wg1_set_peer(pub, allowed_ips=allowed, preshared_key=psk, reset_first=False)
 
         return True
+
     def _extract_wg_sessions(self, detailed_users):
         sessions = []
         peers_map = self._wg1_load_peers_db()
@@ -1204,8 +1186,6 @@ class StatusHandler(BaseHTTPRequestHandler):
         return aggregated
 
     def _handle_l2tp_single(self, cmd):
-        
-
         uname = (cmd.get("username") or "").strip()
         passw = cmd.get("password")
         action = (cmd.get("action") or "add").strip().lower()
@@ -1260,9 +1240,6 @@ class StatusHandler(BaseHTTPRequestHandler):
             return False, f"Write failed: {str(e)}"
 
     def _handle_cisco_single(self, cmd):
-
-        
-        
         uname = (cmd.get("username") or "").strip()
         passw = cmd.get("password")
         action = (cmd.get("action") or "add").strip().lower()
@@ -1286,7 +1263,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                 try:
                     salt = os.urandom(8).hex()
                     chk = subprocess.check_output(
-                        ["openssl", "passwd", "-6", "-salt", salt, passw], 
+                        ["openssl", "passwd", "-6", "-salt", salt, passw],
                         stderr=subprocess.DEVNULL, timeout=5
                     ).decode().strip()
                     hashed_pw = f"{uname}:*:{chk}"
@@ -1302,7 +1279,8 @@ class StatusHandler(BaseHTTPRequestHandler):
                     user_prefix = f"{uname}:"
 
                     for line in lines:
-                        if not line.strip(): continue
+                        if not line.strip():
+                            continue
                         if line.startswith(user_prefix):
                             user_found = True
                             if action == "delete":
@@ -1315,7 +1293,6 @@ class StatusHandler(BaseHTTPRequestHandler):
                     if action in ["add", "update"] and not user_found:
                         new_lines.append(hashed_pw + "\n")
 
-                    # بازنویسی
                     f.seek(0)
                     f.truncate()
                     f.writelines(new_lines)
@@ -1325,7 +1302,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                     fcntl.flock(f, fcntl.LOCK_UN)
 
             subprocess.run(["occtl", "reload"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
-            
+
             subprocess.run(["pkill", "-HUP", "ocserv-main"], check=False, timeout=5)
 
             return True, f"Cisco {action} done via OpenSSL"
@@ -1584,7 +1561,7 @@ class StatusHandler(BaseHTTPRequestHandler):
             with GLOBAL_DATA_STORE["lock"]:
                 if GLOBAL_DATA_STORE["data"]:
                     response_data = GLOBAL_DATA_STORE["data"]
-            
+
             if not response_data:
                 cpu, ram, disk = self._get_system_stats()
                 response_data = {
@@ -1635,9 +1612,16 @@ class StatusHandler(BaseHTTPRequestHandler):
                 if cmd0 in ("wg1_upload_conf", "upload_wg1_conf"):
                     wg_conf = data.get("content") if "content" in data else data.get("conf")
                     if wg_conf is not None:
-                        ok = self._wg1_write_conf(wg_conf)
-                        if ok and bool(data.get("restart", True)):
-                            self._wg1_restart()
+                        old_file_content = ""
+                        if os.path.exists(WG1_CONF):
+                            with open(WG1_CONF, "r") as f:
+                                old_file_content = f.read().strip()
+                        if old_file_content != wg_conf.strip():
+                            ok = self._wg1_write_conf(wg_conf)
+                            if ok is True and bool(data.get("restart", True)):
+                                self._wg1_restart()
+                        else:
+                            ok = True
                         self._send_json(200, {"success": bool(ok)})
                         return
 
@@ -1685,8 +1669,6 @@ class StatusHandler(BaseHTTPRequestHandler):
                         res_extra = {"details": details, "output": output}
 
                     elif cmd == "sync_revocation":
-                        
-
                         pki_dir = "/etc/openvpn/server/easy-rsa/pki"
                         os.makedirs(pki_dir, exist_ok=True)
 
@@ -1804,6 +1786,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                                 os.chmod(str(p_ccd), 0o644)
                             except:
                                 pass
+
                             try:
                                 dbp = self._wg1_load_peers_db()
                                 info = dbp.get(uname) if isinstance(dbp, dict) else None
@@ -1818,21 +1801,39 @@ class StatusHandler(BaseHTTPRequestHandler):
                                     )
                                     psk = info.get('preshared_key')
                                     if pub and allowed:
+                                        allowed_norm = self._wg1_normalize_allowed_ips(allowed)
+
+                                        current_allowed = None
                                         try:
-                                            self._wg1_remove_peer(pub)
+                                            dump = subprocess.run(
+                                                ["wg", "show", WG1_IFACE, "dump"],
+                                                capture_output=True, text=True, timeout=5
+                                            )
+                                            if dump.returncode == 0:
+                                                for line in dump.stdout.splitlines():
+                                                    parts = line.split("\t")
+                                                    if len(parts) >= 4 and parts[0].strip() == pub:
+                                                        current_allowed = parts[3].strip()
+                                                        break
                                         except:
                                             pass
-                                        ok_peer = self._wg1_set_peer(pub, allowed_ips=allowed, preshared_key=psk, reset_first=False)
-                                        if ok_peer:
-                                            info["disabled"] = False
+
+                                        if current_allowed == (allowed_norm or ""):
+                                            success, msg = True, "Peer already configured correctly"
+                                        else:
                                             try:
-                                                if allowed and not info.get("allowed_ips"):
-                                                    info["allowed_ips"] = str(allowed).strip()
+                                                self._wg1_remove_peer(pub)
                                             except:
                                                 pass
-                                            self._wg1_save_peers_db(dbp)
+                                            ok_peer = self._wg1_set_peer(pub, allowed_ips=allowed, preshared_key=psk, reset_first=False)
+                                            if ok_peer:
+                                                info["disabled"] = False
+                                                if allowed and not info.get("allowed_ips"):
+                                                    info["allowed_ips"] = str(allowed).strip()
+                                                self._wg1_save_peers_db(dbp)
                             except:
                                 pass
+
                             success, msg = True, "CCD Created"
                         else:
                             success, msg = False, "Missing username"
@@ -1895,7 +1896,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                             wg_conf = item.get("conf")
                         if wg_conf is not None:
                             ok = self._wg1_write_conf(wg_conf)
-                            if ok and bool(item.get("restart", True)):
+                            if ok is True and bool(item.get("restart", True)):
                                 self._wg1_restart()
                             success = bool(ok)
                             msg = "WG1 config updated" if ok else "Failed to write WG1 config"
@@ -2037,6 +2038,19 @@ class StatusHandler(BaseHTTPRequestHandler):
                         desired_pubs = set()
                         db = self._wg1_load_peers_db() or {}
 
+                        current_wg_peers = {}
+                        try:
+                            dump_proc = subprocess.run(["wg", "show", WG1_IFACE, "dump"], capture_output=True, text=True, timeout=5)
+                            if dump_proc.returncode == 0:
+                                lines = dump_proc.stdout.strip().splitlines()
+                                if len(lines) > 1:
+                                    for line in lines[1:]:
+                                        parts = line.split("\t")
+                                        if len(parts) >= 4:
+                                            current_wg_peers[parts[0].strip()] = parts[3].strip()
+                        except:
+                            pass
+
                         if isinstance(peers, list):
                             for p in peers:
                                 try:
@@ -2046,8 +2060,17 @@ class StatusHandler(BaseHTTPRequestHandler):
                                     psk = p.get("preshared_key")
                                     if not pub:
                                         continue
+                                    pub = str(pub).strip()
                                     desired_pubs.add(pub)
-                                    self._wg1_set_peer(pub, allowed_ips=allowed, preshared_key=psk, reset_first=False)
+
+                                    allowed_norm = self._wg1_normalize_allowed_ips(allowed)
+                                    needs_update = True
+
+                                    if pub in current_wg_peers and current_wg_peers[pub] == (allowed_norm or "") and not psk:
+                                        needs_update = False
+
+                                    if needs_update:
+                                        self._wg1_set_peer(pub, allowed_ips=allowed, preshared_key=psk, reset_first=False)
 
                                     if uname_p:
                                         if uname_p not in db or not isinstance(db.get(uname_p), dict):
@@ -2259,15 +2282,11 @@ class StatusHandler(BaseHTTPRequestHandler):
                             success, msg = True, "Cisco Port Updated"
                         else:
                             success, msg = False, "Missing port"
-  
-  
-                    elif cmd == "wg1_sync_files":
-                        
 
+                    elif cmd == "wg1_sync_files":
                         wg_conf = item.get("wg1_conf")
                         peers_json = item.get("peers_json")
                         listen_port = item.get("listen_port")
-                        restart = bool(item.get("restart", True))
                         provision = bool(item.get("provision", False))
 
                         if not wg_conf or not peers_json:
@@ -2347,21 +2366,27 @@ class StatusHandler(BaseHTTPRequestHandler):
                                         _patch_nat_iface_in_file("/etc/wireguard/wg1.conf", iface)
                                         _patch_nat_iface_in_file("/etc/wireguard/wg1_base.conf", iface)
 
-                                    if restart:
-                                        subprocess.run(
-                                            ["systemctl", "enable", "wg-quick@wg1"],
-                                            check=False,
-                                            stdout=subprocess.DEVNULL,
-                                            stderr=subprocess.DEVNULL,
-                                            timeout=10,
+                                    if shutil.which("wg") and shutil.which("wg-quick"):
+                                        cp = subprocess.run(
+                                            ["systemctl", "is-active", f"wg-quick@{WG1_IFACE}"],
+                                            capture_output=True,
+                                            text=True,
+                                            timeout=5
                                         )
-                                        subprocess.run(
-                                            ["systemctl", "restart", "wg-quick@wg1"],
-                                            check=False,
-                                            stdout=subprocess.DEVNULL,
-                                            stderr=subprocess.DEVNULL,
-                                            timeout=30,
-                                        )
+                                        if cp.returncode == 0 and cp.stdout.strip() == "active":
+                                            subprocess.run(
+                                                f"wg syncconf {WG1_IFACE} <(wg-quick strip {WG1_IFACE})",
+                                                shell=True,
+                                                executable="/bin/bash",
+                                                check=False,
+                                                timeout=10
+                                            )
+                                        else:
+                                            subprocess.run(
+                                                ["systemctl", "start", f"wg-quick@{WG1_IFACE}"],
+                                                check=False,
+                                                timeout=10
+                                            )
 
                                     try:
                                         peers_after_sync = self._wg1_load_peers_db() or {}
@@ -2376,11 +2401,10 @@ class StatusHandler(BaseHTTPRequestHandler):
                                     except:
                                         pass
 
-                                    success, msg = True, "WG1 synced"
+                                    success, msg = True, "WG1 synced without restart"
                                 except Exception as e:
                                     success, msg = False, str(e)
-                
-                
+
                     elif cmd == "update_wg1_port":
                         new_port = item.get("port")
                         if new_port is not None:
@@ -2426,11 +2450,10 @@ class StatusHandler(BaseHTTPRequestHandler):
                 pass
 
 
-
 def background_monitor_engine():
     dummy_handler = StatusHandler(None, None, None, run_setup=False)
     executor = ThreadPoolExecutor(max_workers=8)
-    
+
     while True:
         start_ts = time.time()
         try:
@@ -2492,9 +2515,6 @@ def background_monitor_engine():
 
         elapsed = time.time() - start_ts
         time.sleep(max(1.0, 10.0 - elapsed))
-
-
-
 
 
 def run_server():
