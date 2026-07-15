@@ -1880,6 +1880,19 @@ class StatusHandler(BaseHTTPRequestHandler):
                         else:
                             success, msg = False, "Missing username"
 
+
+                    elif cmd == "delete_ccd":
+                        if uname:
+                            try:
+                                (Path(CCD_DIR) / str(uname)).unlink(missing_ok=True)
+                                success, msg = True, "CCD Deleted"
+                            except Exception as e:
+                                success, msg = False, f"Failed to delete CCD: {e}"
+                        else:
+                            success, msg = False, "Missing username"
+
+
+
                     elif cmd == "upload_ovpn":
                         content = item.get("ovpn_content") or item.get("content")
                         if uname and content:
