@@ -19,10 +19,10 @@ The panel is designed for administrators demanding granular control over user ac
 
 ### 🛡️ Multi-Protocol & Core Stability
 * **Multi-Protocol Support**: Full integration and management for:
-    * **OpenVPN** (UDP/TCP)
+    * **OpenVPN** Multi ports(UDP/TCP)
     * **Cisco AnyConnect (Ocserv)**
     * **L2TP/IPsec**
-    * **WireGuard (wg1)**
+    * **WireGuard (wg1 and wg2 and ...)**
 * **Database Scalability**: Added core support for **PostgreSQL** alongside SQLite. Includes a **Smart Migration Engine** to securely and automatically transfer all existing user data from SQLite to PostgreSQL for high-load environments.
 * **Persistent Security Key**: Implemented a security fix to store the `SECRET_KEY` persistently, enhancing session security and preventing forced admin logouts after service restarts.
 * **Concurrency Fixes**: Major architectural upgrade with the implementation of `DB_WRITE_LOCK` and `GLOBAL_SYNC_LOCK` to eliminate deadlocks and database corruption under high traffic/activity.
