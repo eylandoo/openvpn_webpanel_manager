@@ -35,12 +35,21 @@ WG1_HANDSHAKE_TIMEOUT = 120
 
 WG1_TRAFFIC_TIMEOUT = 10
 WG1_PEER_ACTIVITY = {}
+WG_INSTANCE_PEER_ACTIVITY = {}
 WG1_DB_MUTEX = threading.RLock()
 WG1_DB_LAST_ERR_LOG = 0.0
 WG1_DB_ERR_LOG_EVERY = 10.0
 
 WG1_DB_CACHE = {}
 WG1_DB_LAST_MTIME = 0
+
+WG_INSTANCE_NAME_RE = re.compile(r'^wg([2-9]|[1-9][0-9]+)$')
+WG_INSTANCE_DB_MUTEX = threading.RLock()
+
+
+def _is_valid_wg_instance_name(name):
+    return bool(name) and bool(WG_INSTANCE_NAME_RE.match(str(name)))
+
 
 L2TP_SESSION_CACHE = {}
 L2TP_CACHE_LOCK = threading.Lock()
@@ -1128,8 +1137,17 @@ class StatusHandler(BaseHTTPRequestHandler):
                 recent_activity = bool(last_activity > 0 and (float(now_ts) - last_activity) <= 10)
                 online = bool(recent_activity or (fresh_handshake and endpoint_present))
 
+                was_online = bool(prev.get("online"))
+                if online and not was_online:
+                    prev["first_seen"] = float(now_ts)
+                elif online and not prev.get("first_seen"):
+                    prev["first_seen"] = float(now_ts)
+                prev["online"] = online
+
                 if not online:
                     continue
+
+                first_seen = float(prev.get("first_seen") or now_ts)
 
                 real_ip = ""
                 if endpoint_present:
@@ -1149,7 +1167,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                     "v_ip": allowed_ips,
                     "bytes_received": rx,
                     "bytes_sent": tx,
-                    "connected_at": int(last_activity) if last_activity else (latest_handshake if latest_handshake else 0),
+                    "connected_at": int(first_seen),
                     "session_id": pub_key,
                     "public_key": pub_key,
                     "peer_key": pub_key,
@@ -1171,6 +1189,610 @@ class StatusHandler(BaseHTTPRequestHandler):
             pass
 
         return sessions
+
+
+    def _wg_instances(self):
+        instances = []
+        try:
+            confs = glob.glob("/etc/wireguard/wg*.conf")
+        except Exception:
+            confs = []
+        for conf in confs:
+            name = os.path.basename(conf).replace('.conf', '')
+            if name in ('wg0', 'wg1') or name.endswith('_base'):
+                continue
+            port = None
+            subnet = None
+            try:
+                with open(conf, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+                port_match = re.search(r'ListenPort\s*=\s*(\d+)', content)
+                port = int(port_match.group(1)) if port_match else None
+                subnet_match = re.search(r'Address\s*=\s*([\d.]+/\d+)', content)
+                subnet = subnet_match.group(1) if subnet_match else None
+            except Exception:
+                pass
+            unit_state = self._systemctl_state(f"wg-quick@{name}.service")
+            if unit_state["state"] == "not-found":
+                unit_state = self._systemctl_state(f"wg-quick@{name}")
+            instances.append({
+                "name": name,
+                "conf": conf,
+                "port": port,
+                "subnet": subnet,
+                "service": unit_state
+            })
+        return instances
+
+    def _wg_instance_load_peers_db(self, instance_name):
+        peers_db_path = f"/etc/wireguard/{instance_name}_peers.json"
+        with WG_INSTANCE_DB_MUTEX:
+            try:
+                if not os.path.exists(peers_db_path):
+                    return {}
+                with open(peers_db_path, "r", encoding="utf-8") as f:
+                    raw = f.read()
+                if not raw.strip():
+                    return {}
+                data = json.loads(raw)
+                return data if isinstance(data, dict) else {}
+            except Exception:
+                return {}
+
+    def _wg_instance_save_peers_db(self, instance_name, data):
+        if not isinstance(data, dict):
+            return False
+        peers_db_path = f"/etc/wireguard/{instance_name}_peers.json"
+        with WG_INSTANCE_DB_MUTEX:
+            tmp_path = None
+            try:
+                Path(os.path.dirname(peers_db_path) or "/").mkdir(parents=True, exist_ok=True)
+                fd, tmp_path = tempfile.mkstemp(prefix=f"{instance_name}_peers_", suffix=".tmp", dir=os.path.dirname(peers_db_path))
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False)
+                    f.flush()
+                    try:
+                        os.fsync(f.fileno())
+                    except Exception:
+                        pass
+                os.replace(tmp_path, peers_db_path)
+                tmp_path = None
+                try:
+                    os.chmod(peers_db_path, 0o600)
+                except Exception:
+                    pass
+                return True
+            except Exception as e:
+                print(f"[WG-instance] ERROR saving peers db for {instance_name}: {e}", flush=True)
+                return False
+            finally:
+                if tmp_path:
+                    try:
+                        os.unlink(tmp_path)
+                    except Exception:
+                        pass
+
+    def _wg_instance_read_base_conf(self, instance_name):
+        base_path = f"/etc/wireguard/{instance_name}_base.conf"
+        try:
+            if os.path.exists(base_path):
+                with open(base_path, "r", encoding="utf-8", errors="ignore") as f:
+                    txt = f.read().strip()
+                if txt:
+                    return txt + "\n\n"
+        except Exception:
+            pass
+        return "[Interface]\n"
+
+    def _wg_instance_normalize_allowed_ips(self, allowed_ips):
+        if not allowed_ips:
+            return None
+        try:
+            s = str(allowed_ips).strip()
+            if not s:
+                return None
+            parts = [p.strip() for p in re.split(r"[,\s]+", s) if p.strip()]
+            norm_parts = []
+            for p in parts:
+                if "/" not in p:
+                    norm_parts.append(p + ("/128" if ":" in p else "/32"))
+                else:
+                    norm_parts.append(p)
+            return ",".join(norm_parts) if norm_parts else None
+        except Exception:
+            return str(allowed_ips).strip() or None
+
+    def _wg_instance_rebuild_conf_from_peers_db(self, instance_name):
+        try:
+            peers = self._wg_instance_load_peers_db(instance_name)
+            if not isinstance(peers, dict):
+                return False
+            base = self._wg_instance_read_base_conf(instance_name).rstrip() + "\n\n"
+            out = [base]
+            for uname, pdata in peers.items():
+                if not isinstance(pdata, dict):
+                    continue
+                if bool(pdata.get("disabled")):
+                    continue
+                pk = str(pdata.get("public_key") or "").strip()
+                allowed = pdata.get("allowed_ip") or pdata.get("allowed_ips")
+                allowed_norm = self._wg_instance_normalize_allowed_ips(allowed)
+                if not pk or not allowed_norm:
+                    continue
+                out.append("[Peer]\n")
+                out.append(f"PublicKey = {pk}\n")
+                out.append(f"AllowedIPs = {allowed_norm}\n\n")
+
+            conf_path = f"/etc/wireguard/{instance_name}.conf"
+            Path(os.path.dirname(conf_path) or "/").mkdir(parents=True, exist_ok=True)
+            tmp = conf_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.writelines(out)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except Exception:
+                    pass
+            try:
+                os.chmod(tmp, 0o600)
+            except Exception:
+                pass
+            os.replace(tmp, conf_path)
+            return True
+        except Exception as e:
+            print(f"[WG-instance] rebuild config failed for {instance_name}: {e}", flush=True)
+            return False
+
+    def _wg_instance_sync_kernel(self, instance_name):
+        try:
+            cp = subprocess.run(["ip", "link", "show", instance_name], capture_output=True, text=True, timeout=5)
+            if cp.returncode == 0:
+                subprocess.run(
+                    f"wg syncconf {instance_name} <(wg-quick strip {instance_name})",
+                    shell=True, executable="/bin/bash", check=False, timeout=10
+                )
+                return True
+            subprocess.run(["systemctl", "start", f"wg-quick@{instance_name}"], check=False, timeout=15)
+            return True
+        except Exception:
+            return False
+
+    def _wg_instance_ensure_runtime(self, instance_name):
+        try:
+            if not shutil.which("wg") or not shutil.which("wg-quick"):
+                return False, "wireguard tools missing"
+
+            conf_path = f"/etc/wireguard/{instance_name}.conf"
+            try:
+                Path(os.path.dirname(conf_path) or "/").mkdir(parents=True, exist_ok=True)
+                if not os.path.exists(conf_path):
+                    self._wg_instance_rebuild_conf_from_peers_db(instance_name)
+            except Exception:
+                pass
+
+            for _ in range(2):
+                try:
+                    cp = subprocess.run(["wg", "show", instance_name], capture_output=True, text=True, timeout=5)
+                    if cp.returncode == 0:
+                        return True, "ok"
+                except Exception:
+                    pass
+                try:
+                    subprocess.run(
+                        ["systemctl", "start", f"wg-quick@{instance_name}"],
+                        check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20
+                    )
+                except Exception:
+                    pass
+
+            try:
+                cp2 = subprocess.run(["wg", "show", instance_name], capture_output=True, text=True, timeout=5)
+                if cp2.returncode == 0:
+                    return True, "ok"
+                return False, (cp2.stderr or "wg interface not active").strip()
+            except Exception as e:
+                return False, str(e)
+        except Exception as e:
+            return False, str(e)
+
+    def _wg_instance_remove_peer(self, instance_name, pub_key):
+        if not pub_key:
+            return False
+        pub_key = str(pub_key).strip()
+        try:
+            WG_INSTANCE_PEER_ACTIVITY.pop(f"{instance_name}:{pub_key}", None)
+        except Exception:
+            pass
+        try:
+            self._wg_instance_ensure_runtime(instance_name)
+            cp = subprocess.run(
+                ["wg", "set", instance_name, "peer", str(pub_key).strip(), "remove"],
+                check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10
+            )
+            return cp.returncode == 0
+        except Exception:
+            return False
+
+    def _wg_instance_kick_peer(self, instance_name, pub_key):
+        if not pub_key:
+            return False
+        pub = str(pub_key).strip()
+        db = self._wg_instance_load_peers_db(instance_name)
+        info = None
+        for _u, d in (db or {}).items():
+            try:
+                if isinstance(d, dict) and str(d.get("public_key") or "").strip() == pub:
+                    info = d
+                    break
+            except Exception:
+                pass
+
+        try:
+            WG_INSTANCE_PEER_ACTIVITY.pop(f"{instance_name}:{pub}", None)
+        except Exception:
+            pass
+
+        self._wg_instance_remove_peer(instance_name, pub)
+
+        if isinstance(info, dict):
+            try:
+                if bool(info.get("disabled")):
+                    return True
+            except Exception:
+                pass
+            allowed = info.get("allowed_ip") or info.get("allowed_ips")
+            allowed_norm = self._wg_instance_normalize_allowed_ips(allowed)
+            if allowed_norm:
+                try:
+                    cp = subprocess.run(
+                        ["wg", "set", instance_name, "peer", pub, "allowed-ips", allowed_norm],
+                        check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10
+                    )
+                    if cp.returncode != 0:
+                        return False
+                except Exception:
+                    return False
+            return True
+        return True
+
+    def _update_listen_port_in_file(self, path, port):
+        try:
+            if not os.path.exists(path):
+                return True
+            with open(path, "r") as f:
+                lines = f.readlines()
+            replaced = False
+            out = []
+            for line in lines:
+                if (not replaced) and re.match(r"^\s*ListenPort\s*=", line):
+                    out.append(f"ListenPort = {int(port)}\n")
+                    replaced = True
+                else:
+                    out.append(line)
+            if not replaced:
+                inserted = False
+                out2 = []
+                for line in out:
+                    out2.append(line)
+                    if (not inserted) and re.match(r"^\s*Address\s*=", line):
+                        out2.append(f"ListenPort = {int(port)}\n")
+                        inserted = True
+                out = out2
+            tmp = path + ".tmp"
+            with open(tmp, "w") as f:
+                f.writelines(out)
+            try:
+                os.chmod(tmp, 0o600)
+            except Exception:
+                pass
+            os.replace(tmp, path)
+            return True
+        except Exception:
+            return False
+
+    def _wg_instance_detect_public_iface(self):
+        try:
+            cp = subprocess.run(
+                "ip route get 1.1.1.1 | awk '{for(i=1;i<=NF;i++) if ($i==\"dev\") {print $(i+1); exit}}'",
+                shell=True, executable="/bin/bash", capture_output=True, text=True, timeout=5
+            )
+            iface = (cp.stdout or "").strip()
+            if iface:
+                return iface
+        except Exception:
+            pass
+        return "eth0"
+
+    def _wg_instance_open_udp_port(self, port):
+        p = str(int(port))
+        try:
+            if shutil.which("ufw"):
+                subprocess.run(["ufw", "allow", f"{p}/udp"], check=False, capture_output=True, timeout=10)
+        except Exception:
+            pass
+        try:
+            check = subprocess.run(["iptables", "-C", "INPUT", "-p", "udp", "--dport", p, "-j", "ACCEPT"], check=False, capture_output=True, timeout=5)
+            if check.returncode != 0:
+                subprocess.run(["iptables", "-I", "INPUT", "-p", "udp", "--dport", p, "-j", "ACCEPT"], check=False, capture_output=True, timeout=5)
+        except Exception:
+            pass
+
+    def _wg_instance_provision(self, instance_name, port, subnet):
+        try:
+            port = int(port)
+            wg_dir = "/etc/wireguard"
+            Path(wg_dir).mkdir(parents=True, exist_ok=True)
+            try:
+                os.chmod(wg_dir, 0o700)
+            except Exception:
+                pass
+
+            try:
+                subprocess.run(["sysctl", "-w", "net.ipv4.ip_forward=1"], check=False, timeout=5)
+                sysctl_conf = "/etc/sysctl.conf"
+                content = ""
+                if os.path.exists(sysctl_conf):
+                    with open(sysctl_conf, "r") as f:
+                        content = f.read()
+                if "net.ipv4.ip_forward" not in content:
+                    with open(sysctl_conf, "a") as f:
+                        f.write("\nnet.ipv4.ip_forward=1\n")
+            except Exception:
+                pass
+
+            if not shutil.which("wg") or not shutil.which("wg-quick"):
+                subprocess.run(["apt-get", "update", "-y"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
+                subprocess.run(["apt-get", "install", "-y", "wireguard", "wireguard-tools", "iproute2", "iptables"],
+                                check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=180)
+                if not shutil.which("wg") or not shutil.which("wg-quick"):
+                    return False, "Failed to install wireguard-tools"
+
+            priv_path = f"{wg_dir}/{instance_name}_privatekey"
+            pub_path = f"{wg_dir}/{instance_name}_publickey"
+            if not (os.path.exists(priv_path) and os.path.exists(pub_path)):
+                try:
+                    os.umask(0o077)
+                except Exception:
+                    pass
+                priv = subprocess.run(["wg", "genkey"], capture_output=True, text=True, timeout=10).stdout.strip()
+                if not priv:
+                    return False, "Failed to generate private key"
+                pub = subprocess.run(["wg", "pubkey"], input=(priv + "\n"), capture_output=True, text=True, timeout=10).stdout.strip()
+                if not pub:
+                    return False, "Failed to derive public key"
+                with open(priv_path, "w") as f:
+                    f.write(priv + "\n")
+                with open(pub_path, "w") as f:
+                    f.write(pub + "\n")
+                try:
+                    os.chmod(priv_path, 0o600)
+                    os.chmod(pub_path, 0o600)
+                except Exception:
+                    pass
+
+            with open(priv_path, "r") as f:
+                priv_key_content = f.read().strip()
+
+            pub_iface = self._wg_instance_detect_public_iface()
+            base_conf = (
+                "[Interface]\n"
+                f"Address = {subnet}\n"
+                f"ListenPort = {port}\n"
+                f"PrivateKey = {priv_key_content}\n"
+                "SaveConfig = false\n\n"
+                f"PostUp = iptables -t nat -I POSTROUTING 1 -s {subnet} -o {pub_iface} -j MASQUERADE\n"
+                f"PostDown = iptables -t nat -D POSTROUTING -s {subnet} -o {pub_iface} -j MASQUERADE\n"
+            )
+            base_path = f"{wg_dir}/{instance_name}_base.conf"
+            tmp = base_path + ".tmp"
+            with open(tmp, "w") as f:
+                f.write(base_conf)
+            try:
+                os.chmod(tmp, 0o600)
+            except Exception:
+                pass
+            os.replace(tmp, base_path)
+
+            peers_path = f"{wg_dir}/{instance_name}_peers.json"
+            if not os.path.exists(peers_path):
+                self._wg_instance_save_peers_db(instance_name, {})
+
+            self._wg_instance_rebuild_conf_from_peers_db(instance_name)
+            self._wg_instance_open_udp_port(port)
+
+            try:
+                if shutil.which("netfilter-persistent"):
+                    subprocess.run(["netfilter-persistent", "save"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+            except Exception:
+                pass
+
+            subprocess.run(["systemctl", "enable", f"wg-quick@{instance_name}"], check=False, timeout=15)
+            subprocess.run(["systemctl", "restart", f"wg-quick@{instance_name}"], check=False, timeout=20)
+            return True, "Instance provisioned"
+        except Exception as e:
+            return False, f"Provisioning failed: {e}"
+
+    def _wg_instance_teardown(self, instance_name):
+        try:
+            subprocess.run(["systemctl", "stop", f"wg-quick@{instance_name}"], check=False, timeout=15)
+            subprocess.run(["systemctl", "disable", f"wg-quick@{instance_name}"], check=False, timeout=15)
+            for path in (
+                f"/etc/wireguard/{instance_name}.conf",
+                f"/etc/wireguard/{instance_name}_base.conf",
+                f"/etc/wireguard/{instance_name}_privatekey",
+                f"/etc/wireguard/{instance_name}_publickey",
+                f"/etc/wireguard/{instance_name}_peers.json",
+            ):
+                try:
+                    if os.path.exists(path):
+                        os.remove(path)
+                except Exception:
+                    pass
+            subprocess.run(["systemctl", "daemon-reload"], check=False, timeout=10)
+            return True, "Instance removed"
+        except Exception as e:
+            return False, f"Removal failed: {e}"
+
+    def _extract_wg_sessions_for_instance(self, instance_name, detailed_users):
+        sessions = []
+        try:
+            peers = self._wg_instance_load_peers_db(instance_name)
+            pub_to_user = {}
+            for uname, pdata in (peers or {}).items():
+                if isinstance(pdata, dict):
+                    pk = pdata.get("public_key")
+                    if pk and not bool(pdata.get("disabled")):
+                        pub_to_user[pk] = uname
+            if not pub_to_user:
+                return sessions
+
+            res = subprocess.run(["wg", "show", instance_name, "dump"], capture_output=True, text=True, timeout=3)
+            if res.returncode != 0:
+                return sessions
+
+            now_ts = int(time.time())
+
+            for line in (res.stdout or "").strip().splitlines()[1:]:
+                parts = line.split("\t")
+                if len(parts) < 8:
+                    continue
+                pub_key = parts[0].strip()
+                uname = pub_to_user.get(pub_key)
+                if not uname:
+                    continue
+                endpoint = (parts[2] or "").strip()
+                allowed_ips = parts[3].strip()
+                try:
+                    rx = int(parts[5] or 0)
+                except Exception:
+                    rx = 0
+                try:
+                    tx = int(parts[6] or 0)
+                except Exception:
+                    tx = 0
+                try:
+                    latest_handshake = int(parts[4] or 0)
+                except Exception:
+                    latest_handshake = 0
+
+                if rx <= 0 and tx <= 0 and latest_handshake <= 0:
+                    continue
+
+                activity_key = f"{instance_name}:{pub_key}"
+                endpoint_present = bool(endpoint)
+                fresh_handshake = bool(latest_handshake > 0 and (now_ts - latest_handshake) <= 10)
+
+                prev = WG_INSTANCE_PEER_ACTIVITY.get(activity_key)
+                if prev is None:
+                    WG_INSTANCE_PEER_ACTIVITY[activity_key] = {
+                        "rx": rx,
+                        "tx": tx,
+                        "last_activity": float(now_ts) if (fresh_handshake and endpoint_present) else 0.0,
+                        "last_handshake": latest_handshake,
+                        "endpoint": endpoint,
+                    }
+                    prev = WG_INSTANCE_PEER_ACTIVITY[activity_key]
+                else:
+                    try:
+                        prev_rx = int(prev.get("rx", 0) or 0)
+                    except Exception:
+                        prev_rx = 0
+                    try:
+                        prev_tx = int(prev.get("tx", 0) or 0)
+                    except Exception:
+                        prev_tx = 0
+                    try:
+                        prev_hs = int(prev.get("last_handshake", 0) or 0)
+                    except Exception:
+                        prev_hs = 0
+                    prev_ep = str(prev.get("endpoint") or "")
+
+                    counter_reset = (rx < prev_rx) or (tx < prev_tx)
+                    traffic_moved = rx > prev_rx
+                    handshake_moved = latest_handshake > prev_hs
+                    endpoint_changed = endpoint_present and endpoint != prev_ep
+
+                    if counter_reset:
+                        prev["rx"] = rx
+                        prev["tx"] = tx
+                        prev["last_handshake"] = latest_handshake
+                        prev["endpoint"] = endpoint
+                        prev["last_activity"] = float(now_ts) if (fresh_handshake and endpoint_present) else 0.0
+                    else:
+                        if traffic_moved or handshake_moved or endpoint_changed:
+                            prev["last_activity"] = float(now_ts)
+                        prev["rx"] = rx
+                        prev["tx"] = tx
+                        prev["last_handshake"] = latest_handshake
+                        prev["endpoint"] = endpoint
+
+                last_activity = float(prev.get("last_activity", 0) or 0)
+                recent_activity = bool(last_activity > 0 and (float(now_ts) - last_activity) <= 10)
+                online = bool(recent_activity or (fresh_handshake and endpoint_present))
+
+                was_online = bool(prev.get("online"))
+                if online and not was_online:
+                    prev["first_seen"] = float(now_ts)
+                elif online and not prev.get("first_seen"):
+                    prev["first_seen"] = float(now_ts)
+                prev["online"] = online
+
+                if not online:
+                    continue
+
+                first_seen = float(prev.get("first_seen") or now_ts)
+
+                real_ip = ""
+                if endpoint_present:
+                    if endpoint.startswith("[") and "]" in endpoint:
+                        real_ip = endpoint.split("]")[0].lstrip("[")
+                    elif ":" in endpoint:
+                        real_ip = endpoint.split(":")[0]
+                    else:
+                        real_ip = endpoint
+
+                sessions.append({
+                    "username": uname,
+                    "protocol": f"WireGuard ({instance_name})",
+                    "instance": instance_name,
+                    "ip": real_ip,
+                    "v_ip": allowed_ips,
+                    "bytes_received": rx,
+                    "bytes_sent": tx,
+                    "connected_at": int(first_seen),
+                    "session_id": pub_key,
+                    "public_key": pub_key,
+                    "peer_key": pub_key,
+                    "source": "node",
+                    "is_active": True
+                })
+
+                with DETAILED_LOCK:
+                    if uname not in detailed_users:
+                        detailed_users[uname] = {}
+                    key = f"WireGuard ({instance_name})"
+                    if key not in detailed_users[uname]:
+                        detailed_users[uname][key] = {"active": 0, "bytes_received": 0, "bytes_sent": 0}
+                    detailed_users[uname][key]["active"] += 1
+                    detailed_users[uname][key]["bytes_received"] += rx
+                    detailed_users[uname][key]["bytes_sent"] += tx
+        except Exception:
+            pass
+        return sessions
+
+    def _get_all_wg_statuses(self, detailed_users):
+        all_sessions = []
+        try:
+            instances = self._wg_instances()
+        except Exception:
+            instances = []
+        for inst in instances:
+            if inst.get("service", {}).get("active"):
+                try:
+                    all_sessions.extend(self._extract_wg_sessions_for_instance(inst["name"], detailed_users))
+                except Exception:
+                    pass
+        return all_sessions
 
     def _build_aggregated(self, detailed_users):
         aggregated = {}
@@ -1548,11 +2170,30 @@ class StatusHandler(BaseHTTPRequestHandler):
         if wg_unit["state"] == "not-found":
             wg_unit = self._systemctl_state(f"wg-quick@{WG1_IFACE}")
 
+        wg_instances = [{
+            "name": WG1_IFACE,
+            "port": self._wg1_get_listen_port(),
+            "installed": wg_installed,
+            "service": wg_unit,
+        }]
+        try:
+            for inst in self._wg_instances():
+                wg_instances.append({
+                    "name": inst.get("name"),
+                    "port": inst.get("port"),
+                    "installed": wg_installed,
+                    "service": inst.get("service") or {},
+                })
+        except Exception:
+            pass
+
+        wg_any_active = bool(wg_unit.get("active")) or any(bool((i.get("service") or {}).get("active")) for i in wg_instances[1:])
+
         return {
             "openvpn": {"installed": openvpn_installed, "active": bool(openvpn_any_active), "instances": openvpn_instances},
             "cisco": {"installed": ocserv_installed, "active": bool(cisco_unit.get("active")), "service": cisco_unit},
             "l2tp": {"installed": bool(l2tp_installed), "active": bool(l2tp_unit.get("active")), "service": l2tp_unit, "services": {"xl2tpd": l2tp_unit}},
-            "wireguard": {"installed": wg_installed, "active": bool(wg_unit.get("active")), "service": wg_unit},
+            "wireguard": {"installed": wg_installed, "active": wg_any_active, "service": wg_unit, "instances": wg_instances},
         }
 
     def do_GET(self):
@@ -1834,24 +2475,66 @@ class StatusHandler(BaseHTTPRequestHandler):
                             except:
                                 pass
 
-                            success, msg = True, "CCD Created"
+                            wg_instance_failures = []
+                            try:
+                                for inst in self._wg_instances():
+                                    inst_name = inst.get("name")
+                                    if not inst_name or not _is_valid_wg_instance_name(inst_name):
+                                        continue
+                                    try:
+                                        with WG_INSTANCE_DB_MUTEX:
+                                            inst_db = self._wg_instance_load_peers_db(inst_name)
+                                            entry = inst_db.get(uname) if isinstance(inst_db, dict) else None
+                                            if not isinstance(entry, dict):
+                                                continue
+                                            pub_i = (entry.get('public_key') or "").strip()
+                                            allowed_i = entry.get('allowed_ip') or entry.get('allowed_ips')
+                                            if not pub_i or not allowed_i:
+                                                continue
+                                            allowed_norm_i = self._wg_instance_normalize_allowed_ips(allowed_i)
+                                            if not allowed_norm_i:
+                                                continue
+                                            cp = subprocess.run(
+                                                ["wg", "set", inst_name, "peer", pub_i, "allowed-ips", allowed_norm_i],
+                                                check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10
+                                            )
+                                            if cp.returncode != 0:
+                                                wg_instance_failures.append(inst_name)
+                                                continue
+                                            entry["disabled"] = False
+                                            inst_db[uname] = entry
+                                            self._wg_instance_save_peers_db(inst_name, inst_db)
+                                    except Exception:
+                                        wg_instance_failures.append(inst_name)
+                            except:
+                                pass
+
+                            if wg_instance_failures:
+                                success, msg = True, f"CCD Created (warning: wg peer update failed on: {', '.join(wg_instance_failures)})"
+                            else:
+                                success, msg = True, "CCD Created"
                         else:
                             success, msg = False, "Missing username"
 
                     elif cmd == "disable_user":
                         if uname:
+                            protocol_failures = []
                             try:
                                 (Path(CCD_DIR) / str(uname)).unlink(missing_ok=True)
                             except:
                                 pass
                             try:
-                                self._handle_l2tp_single({"username": uname, "action": "delete"})
-                            except:
-                                pass
+                                ok_l2tp, msg_l2tp = self._handle_l2tp_single({"username": uname, "action": "delete"})
+                                if not ok_l2tp:
+                                    protocol_failures.append(f"L2TP: {msg_l2tp}")
+                            except Exception as e:
+                                protocol_failures.append(f"L2TP: {e}")
                             try:
-                                self._handle_cisco_single({"username": uname, "action": "delete"})
-                            except:
-                                pass
+                                ok_cisco, msg_cisco = self._handle_cisco_single({"username": uname, "action": "delete"})
+                                if not ok_cisco:
+                                    protocol_failures.append(f"Cisco: {msg_cisco}")
+                            except Exception as e:
+                                protocol_failures.append(f"Cisco: {e}")
                             try:
                                 dbp = self._wg1_load_peers_db()
                                 info = dbp.get(uname) if isinstance(dbp, dict) else None
@@ -1876,7 +2559,35 @@ class StatusHandler(BaseHTTPRequestHandler):
                                     self._wg1_save_peers_db(dbp)
                             except:
                                 pass
-                            success, msg = True, "User Disabled"
+                            wg_instance_failures = []
+                            try:
+                                for inst in self._wg_instances():
+                                    inst_name = inst.get("name")
+                                    if not inst_name or not _is_valid_wg_instance_name(inst_name):
+                                        continue
+                                    try:
+                                        with WG_INSTANCE_DB_MUTEX:
+                                            inst_db = self._wg_instance_load_peers_db(inst_name)
+                                            if not isinstance(inst_db, dict) or uname not in inst_db:
+                                                continue
+                                            entry = inst_db.get(uname)
+                                            if isinstance(entry, dict):
+                                                pub_i = entry.get('public_key')
+                                                if pub_i and not self._wg_instance_remove_peer(inst_name, pub_i):
+                                                    wg_instance_failures.append(inst_name)
+                                                entry["disabled"] = True
+                                                inst_db[uname] = entry
+                                                self._wg_instance_save_peers_db(inst_name, inst_db)
+                                    except Exception:
+                                        wg_instance_failures.append(inst_name)
+                            except:
+                                pass
+                            if wg_instance_failures:
+                                protocol_failures.append(f"WG peer removal failed on: {', '.join(wg_instance_failures)}")
+                            if protocol_failures:
+                                success, msg = True, f"User Disabled (warning: {'; '.join(protocol_failures)})"
+                            else:
+                                success, msg = True, "User Disabled"
                         else:
                             success, msg = False, "Missing username"
 
@@ -2044,6 +2755,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                                 msg = "WG1 peer updated" if ok else "Failed to set peer"
 
                     elif cmd in ("wg1_sync_peers", "wg1_bulk_sync"):
+                      with WG1_DB_MUTEX:
                         peers = item.get("peers")
                         remove_unknown = bool(item.get("remove_unknown", False))
                         ok = True
@@ -2135,6 +2847,200 @@ class StatusHandler(BaseHTTPRequestHandler):
                         else:
                             success, msg = False, "Missing peers list"
 
+                    elif cmd == "wg_instance_sync_peers":
+                        instance_name = str(item.get("instance") or "").strip()
+                        peers = item.get("peers")
+                        remove_unknown = bool(item.get("remove_unknown", False))
+
+                        if not _is_valid_wg_instance_name(instance_name):
+                            success, msg = False, "Invalid or reserved instance name"
+                        elif not isinstance(peers, list):
+                            success, msg = False, "Missing peers list"
+                        else:
+                            self._wg_instance_ensure_runtime(instance_name)
+                            with WG_INSTANCE_DB_MUTEX:
+                                ok = True
+                                desired_pubs = set()
+                                db_peers = self._wg_instance_load_peers_db(instance_name)
+                                if not isinstance(db_peers, dict):
+                                    db_peers = {}
+
+                                current_peers = {}
+                                try:
+                                    dump_proc = subprocess.run(["wg", "show", instance_name, "dump"], capture_output=True, text=True, timeout=5)
+                                    if dump_proc.returncode == 0:
+                                        for line in (dump_proc.stdout or "").strip().splitlines()[1:]:
+                                            parts = line.split("\t")
+                                            if len(parts) >= 4:
+                                                current_peers[parts[0].strip()] = parts[3].strip()
+                                except Exception:
+                                    pass
+
+                                for p in peers:
+                                    try:
+                                        pub = p.get("public_key") or p.get("pub_key")
+                                        uname_p = p.get("username")
+                                        allowed = p.get("allowed_ips") or p.get("allowed_ip") or p.get("v_ip")
+                                        if not pub or not allowed:
+                                            continue
+                                        pub = str(pub).strip()
+                                        allowed_norm = self._wg_instance_normalize_allowed_ips(allowed)
+                                        if not allowed_norm:
+                                            continue
+                                        desired_pubs.add(pub)
+
+                                        if current_peers.get(pub) != allowed_norm:
+                                            subprocess.run(
+                                                ["wg", "set", instance_name, "peer", pub, "allowed-ips", allowed_norm],
+                                                check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10
+                                            )
+
+                                        if uname_p:
+                                            if uname_p not in db_peers or not isinstance(db_peers.get(uname_p), dict):
+                                                db_peers[uname_p] = {}
+                                            db_peers[uname_p]["public_key"] = pub
+                                            db_peers[uname_p]["allowed_ip"] = allowed_norm
+                                            db_peers[uname_p]["disabled"] = False
+                                    except Exception:
+                                        ok = False
+                                        continue
+
+                                if remove_unknown:
+                                    try:
+                                        r = subprocess.run(["wg", "show", instance_name, "peers"], capture_output=True, text=True, timeout=5)
+                                        if r.returncode == 0:
+                                            for pub in (r.stdout or "").split():
+                                                if pub and pub not in desired_pubs:
+                                                    self._wg_instance_remove_peer(instance_name, pub)
+                                    except Exception:
+                                        pass
+                                    try:
+                                        pruned = {}
+                                        for uname_k, ud in (db_peers or {}).items():
+                                            pubk = (ud.get("public_key") or "").strip() if isinstance(ud, dict) else ""
+                                            if pubk and pubk in desired_pubs:
+                                                pruned[uname_k] = ud
+                                        db_peers = pruned
+                                    except Exception:
+                                        pass
+
+                                try:
+                                    self._wg_instance_save_peers_db(instance_name, db_peers)
+                                    self._wg_instance_rebuild_conf_from_peers_db(instance_name)
+                                except Exception:
+                                    ok = False
+
+                                success = bool(ok)
+                                msg = "WG instance peers synced" if ok else "WG instance peers sync completed with errors"
+
+                    elif cmd == "wg_instance_peer_action":
+                        instance_name = str(item.get("instance") or "").strip()
+                        action = str(item.get("action") or "add").strip().lower()
+                        pub = item.get("public_key") or item.get("pub_key")
+                        allowed = item.get("allowed_ips") or item.get("allowed_ip") or item.get("v_ip")
+                        uname_wg = (item.get("username") or "").strip()
+
+                        if action == "upsert":
+                            action = "add"
+                        if action == "remove":
+                            action = "delete"
+
+                        if not _is_valid_wg_instance_name(instance_name):
+                            success, msg = False, "Invalid or reserved instance name"
+                        elif not pub:
+                            success, msg = False, "Missing public_key"
+                        else:
+                            pub = str(pub).strip()
+                            with WG_INSTANCE_DB_MUTEX:
+                                db_peers = self._wg_instance_load_peers_db(instance_name)
+                                if not isinstance(db_peers, dict):
+                                    db_peers = {}
+
+                                if action == "delete":
+                                    ok = self._wg_instance_remove_peer(instance_name, pub)
+                                    if uname_wg and uname_wg in db_peers:
+                                        db_peers.pop(uname_wg, None)
+                                    else:
+                                        for _u, _d in list(db_peers.items()):
+                                            if isinstance(_d, dict) and str(_d.get("public_key") or "").strip() == pub:
+                                                db_peers.pop(_u, None)
+                                    try:
+                                        self._wg_instance_save_peers_db(instance_name, db_peers)
+                                        self._wg_instance_rebuild_conf_from_peers_db(instance_name)
+                                    except Exception:
+                                        ok = False
+                                    success = bool(ok)
+                                    msg = "WG instance peer removed" if ok else "Failed to remove peer"
+                                else:
+                                    allowed_norm = self._wg_instance_normalize_allowed_ips(allowed)
+                                    if not allowed_norm:
+                                        success, msg = False, "Missing/invalid allowed_ips"
+                                    else:
+                                        self._wg_instance_ensure_runtime(instance_name)
+                                        set_res = subprocess.run(
+                                            ["wg", "set", instance_name, "peer", pub, "allowed-ips", allowed_norm],
+                                            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10
+                                        )
+                                        ok = (set_res.returncode == 0)
+                                        if uname_wg:
+                                            if uname_wg not in db_peers or not isinstance(db_peers.get(uname_wg), dict):
+                                                db_peers[uname_wg] = {}
+                                            db_peers[uname_wg]["public_key"] = pub
+                                            db_peers[uname_wg]["allowed_ip"] = allowed_norm
+                                            db_peers[uname_wg]["disabled"] = False
+                                        try:
+                                            self._wg_instance_save_peers_db(instance_name, db_peers)
+                                            self._wg_instance_rebuild_conf_from_peers_db(instance_name)
+                                        except Exception:
+                                            ok = False
+                                        success = bool(ok)
+                                        msg = "WG instance peer added" if ok else "Failed to add peer"
+
+                    elif cmd == "wg_instance_provision":
+                        instance_name = str(item.get("instance") or "").strip()
+                        port = item.get("port")
+                        subnet = str(item.get("subnet") or "").strip()
+                        if not _is_valid_wg_instance_name(instance_name):
+                            success, msg = False, "Invalid or reserved instance name"
+                        elif not port or not subnet:
+                            success, msg = False, "Missing port or subnet"
+                        else:
+                            success, msg = self._wg_instance_provision(instance_name, port, subnet)
+
+                    elif cmd == "wg_instance_remove":
+                        instance_name = str(item.get("instance") or "").strip()
+                        if not _is_valid_wg_instance_name(instance_name):
+                            success, msg = False, "Invalid or reserved instance name"
+                        else:
+                            success, msg = self._wg_instance_teardown(instance_name)
+
+                    elif cmd == "wg_instance_update_port":
+                        instance_name = str(item.get("instance") or "").strip()
+                        new_port = item.get("port")
+                        if not _is_valid_wg_instance_name(instance_name):
+                            success, msg = False, "Invalid or reserved instance name"
+                        elif new_port is None:
+                            success, msg = False, "Missing port"
+                        else:
+                            try:
+                                p = int(new_port)
+                                ok1 = self._update_listen_port_in_file(f"/etc/wireguard/{instance_name}_base.conf", p)
+                                ok2 = self._update_listen_port_in_file(f"/etc/wireguard/{instance_name}.conf", p)
+                                self._wg_instance_open_udp_port(p)
+                                try:
+                                    live = subprocess.run(["wg", "show", instance_name], capture_output=True, text=True, timeout=5)
+                                    if live.returncode == 0:
+                                        subprocess.run(["wg", "set", instance_name, "listen-port", str(p)],
+                                                        check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+                                    else:
+                                        subprocess.run(["systemctl", "restart", f"wg-quick@{instance_name}"], check=False, timeout=20)
+                                except Exception:
+                                    pass
+                                success = bool(ok1 and ok2)
+                                msg = f"Port updated to {p}" if success else "Failed to update port files"
+                            except Exception as e:
+                                success, msg = False, f"Port update failed: {e}"
+
                     elif cmd == "kill" or cmd == "kill_id":
                         uname = str(item.get("username") or "").strip()
                         sid = item.get("session_id")
@@ -2168,7 +3074,12 @@ class StatusHandler(BaseHTTPRequestHandler):
                                     success = True
                                     msg = "Killed OVPN CID"
                                 elif "WireGuard" in proto or "WG" in proto:
-                                    self._wg1_kick_peer(str(sid))
+                                    inst_match = re.search(r'\(([^)]+)\)', proto)
+                                    inst_name = inst_match.group(1).strip() if inst_match else None
+                                    if inst_name and inst_name != "wg1" and _is_valid_wg_instance_name(inst_name):
+                                        self._wg_instance_kick_peer(inst_name, str(sid))
+                                    else:
+                                        self._wg1_kick_peer(str(sid))
                                     success = True
                                     msg = "Kicked WG Peer"
                             except Exception as e:
@@ -2225,13 +3136,31 @@ class StatusHandler(BaseHTTPRequestHandler):
                             except:
                                 pass
 
-                            success = True
-                            msg = "Full Kill Sent"
+                            wg_instance_failures = []
+                            try:
+                                for inst in self._wg_instances():
+                                    inst_name = inst.get("name")
+                                    if not inst_name or not _is_valid_wg_instance_name(inst_name):
+                                        continue
+                                    try:
+                                        with WG_INSTANCE_DB_MUTEX:
+                                            inst_db = self._wg_instance_load_peers_db(inst_name)
+                                            entry = inst_db.get(uname) if isinstance(inst_db, dict) else None
+                                            if isinstance(entry, dict):
+                                                pub_i = entry.get("public_key")
+                                                if pub_i and not self._wg_instance_kick_peer(inst_name, pub_i):
+                                                    wg_instance_failures.append(inst_name)
+                                    except Exception:
+                                        wg_instance_failures.append(inst_name)
+                            except:
+                                pass
 
-                        results.append({"username": uname, "success": success, "message": msg})
+                            success = True
+                            msg = "Full Kill Sent" if not wg_instance_failures else f"Full Kill Sent (warning: wg kick failed on: {', '.join(wg_instance_failures)})"
 
                     elif cmd == "delete_user_completely":
                         if uname:
+                            protocol_failures = []
                             try:
                                 (Path(CCD_DIR) / str(uname)).unlink(missing_ok=True)
                             except:
@@ -2241,13 +3170,17 @@ class StatusHandler(BaseHTTPRequestHandler):
                             except:
                                 pass
                             try:
-                                self._handle_l2tp_single({"username": uname, "action": "delete"})
-                            except:
-                                pass
+                                ok_l2tp, msg_l2tp = self._handle_l2tp_single({"username": uname, "action": "delete"})
+                                if not ok_l2tp:
+                                    protocol_failures.append(f"L2TP: {msg_l2tp}")
+                            except Exception as e:
+                                protocol_failures.append(f"L2TP: {e}")
                             try:
-                                self._handle_cisco_single({"username": uname, "action": "delete"})
-                            except:
-                                pass
+                                ok_cisco, msg_cisco = self._handle_cisco_single({"username": uname, "action": "delete"})
+                                if not ok_cisco:
+                                    protocol_failures.append(f"Cisco: {msg_cisco}")
+                            except Exception as e:
+                                protocol_failures.append(f"Cisco: {e}")
                             try:
                                 subprocess.run(["pkill", "-9", "-f", f"pppd.*name {uname}"], check=False, timeout=5)
                             except:
@@ -2267,7 +3200,34 @@ class StatusHandler(BaseHTTPRequestHandler):
                                     self._wg1_save_peers_db(dbp)
                             except:
                                 pass
-                            success, msg = True, "Deleted"
+                            wg_instance_failures = []
+                            try:
+                                for inst in self._wg_instances():
+                                    inst_name = inst.get("name")
+                                    if not inst_name or not _is_valid_wg_instance_name(inst_name):
+                                        continue
+                                    try:
+                                        with WG_INSTANCE_DB_MUTEX:
+                                            inst_db = self._wg_instance_load_peers_db(inst_name)
+                                            if not isinstance(inst_db, dict) or uname not in inst_db:
+                                                continue
+                                            entry = inst_db.get(uname)
+                                            pub_i = entry.get('public_key') if isinstance(entry, dict) else None
+                                            if pub_i and not self._wg_instance_remove_peer(inst_name, pub_i):
+                                                wg_instance_failures.append(inst_name)
+                                            inst_db.pop(uname, None)
+                                            self._wg_instance_save_peers_db(inst_name, inst_db)
+                                            self._wg_instance_rebuild_conf_from_peers_db(inst_name)
+                                    except Exception:
+                                        wg_instance_failures.append(inst_name)
+                            except:
+                                pass
+                            if wg_instance_failures:
+                                protocol_failures.append(f"WG peer removal failed on: {', '.join(wg_instance_failures)}")
+                            if protocol_failures:
+                                success, msg = True, f"Deleted (warning: {'; '.join(protocol_failures)})"
+                            else:
+                                success, msg = True, "Deleted"
                         else:
                             success, msg = False, "Missing username"
 
@@ -2488,16 +3448,21 @@ def background_monitor_engine():
             def get_wireguard():
                 return dummy_handler._extract_wg_sessions(local_detailed)
 
+            def get_wireguard_multi():
+                return dummy_handler._get_all_wg_statuses(local_detailed)
+
             f_ovpn = executor.submit(get_openvpn)
             f_l2tp = executor.submit(get_l2tp)
             f_cisco = executor.submit(get_cisco)
             f_wg = executor.submit(get_wireguard)
+            f_wg_multi = executor.submit(get_wireguard_multi)
 
             try:
                 sessions.extend(f_ovpn.result(timeout=10) or [])
                 sessions.extend(f_l2tp.result(timeout=10) or [])
                 sessions.extend(f_cisco.result(timeout=10) or [])
                 sessions.extend(f_wg.result(timeout=10) or [])
+                sessions.extend(f_wg_multi.result(timeout=10) or [])
             except:
                 pass
 
