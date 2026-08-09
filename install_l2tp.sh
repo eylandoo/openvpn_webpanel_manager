@@ -8,10 +8,14 @@ VPN_SUBNET="192.168.42.0/24"
 
 export DEBIAN_FRONTEND=noninteractive
 
-killall apt apt-get dpkg 2>/dev/null || true
-rm -f /var/lib/apt/lists/lock
-rm -f /var/cache/apt/archives/lock
-rm -f /var/lib/dpkg/lock*
+
+wait_for_apt_lock() {
+    while fuser /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1; do
+        echo "Waiting for other apt/dpkg processes to release locks..."
+        sleep 3
+    done
+}
+wait_for_apt_lock
 dpkg --configure -a
 
 apt-get update
@@ -36,6 +40,7 @@ fi
 
 if [ -f /etc/ipsec.conf ]; then mv /etc/ipsec.conf /etc/ipsec.conf.bak.$(date +%s); fi
 cat > /etc/ipsec.conf <<EOF
+# eylan-l2tp-conf-version=4
 config setup
     charondebug="ike 1, knl 1, cfg 0"
     uniqueids=no
@@ -43,17 +48,12 @@ conn %default
     keyexchange=ikev1
     authby=secret
     keyingtries=%forever
-    ike=aes256-sha1-modp1024,3des-sha1-modp1024!
-    esp=aes256-sha1,3des-sha1!
+    ike=aes256-sha256-ecp384,aes256-sha256-ecp256,aes256-sha256-modp2048,aes128-sha256-modp2048,aes256-sha1-modp1024,aes128-sha1-modp1024,3des-sha1-modp1024!
+    esp=aes256-sha256-ecp384,aes256-sha256-ecp256,aes256-sha256-modp2048,aes128-sha256-modp2048,aes256-sha1-modp1024,aes128-sha1-modp1024,aes256-sha256,aes128-sha256,aes256-sha1,aes128-sha1,3des-sha1-modp1024,3des-sha1!
     dpddelay=30
     dpdtimeout=120
     dpdaction=clear
-conn L2TP-PSK-NAT
-    rightsubnet=vhost:%priv
-    also=L2TP-PSK-noNAT
-conn L2TP-PSK-noNAT
-    authby=secret
-    pfs=no
+conn L2TP-PSK
     auto=add
     keyingtries=3
     rekey=no
@@ -64,6 +64,9 @@ conn L2TP-PSK-noNAT
     leftprotoport=17/1701
     right=%any
     rightprotoport=17/%any
+    forceencaps=yes
+
+include /etc/ipsec.d/*.conf
 EOF
 
 if [ -f /etc/ipsec.secrets ]; then mv /etc/ipsec.secrets /etc/ipsec.secrets.bak.$(date +%s); fi
