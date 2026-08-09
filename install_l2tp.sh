@@ -8,7 +8,6 @@ VPN_SUBNET="192.168.42.0/24"
 
 export DEBIAN_FRONTEND=noninteractive
 
-
 wait_for_apt_lock() {
     while fuser /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1; do
         echo "Waiting for other apt/dpkg processes to release locks..."
@@ -66,6 +65,8 @@ conn L2TP-PSK
     rightprotoport=17/%any
     forceencaps=yes
 
+# Allow other tools on this server to drop additional IPsec connection
+# profiles without overriding this file (e.g. a separate IKEv2 setup).
 include /etc/ipsec.d/*.conf
 EOF
 
