@@ -21,7 +21,7 @@ elif [[ "$1" == "wireguard" && "$2" == "restart" ]]; then
     systemctl restart wg-quick@wg1 && echo -e "\033[1;32m[✔] WireGuard (wg1) restarted.\033[0m" || echo -e "\033[1;31m[✘] Failed to restart WireGuard (wg1).\033[0m"
     exit 0
 elif [[ "$1" == "singbox" && "$2" == "restart" ]]; then
-    systemctl restart sing-box && echo -e "\033[1;32m[✔] Sing-box (V2Ray) restarted.\033[0m" || echo -e "\033[1;31m[✘] Failed to restart Sing-box (V2Ray).\033[0m"
+    systemctl restart eylan-singbox && echo -e "\033[1;32m[✔] Sing-box (V2Ray) restarted.\033[0m" || echo -e "\033[1;31m[✘] Failed to restart Sing-box (V2Ray).\033[0m"
     exit 0
 
 fi
@@ -99,10 +99,12 @@ run_install_with_progress() {
 
         case "$stage" in
             *[Dd]ownload*|*wget*|*curl*) percent=20 ;;
-            *apt*|*[Uu]pdat*|*[Dd]ependenc*) percent=40 ;;
-            *[Ii]nstall*|*[Cc]onfigur*|*[Ss]etup*) percent=65 ;;
+            *apt*|*[Uu]pdat*|*[Dd]ependenc*|*[Ll]ock*) percent=35 ;;
+            *[Bb]inary*|*[Ii]nstall*) percent=55 ;;
+            *[Cc]onfig*|*[Ss]etup*) percent=70 ;;
             *systemctl*|*[Ss]ervice*|*[Ss]tart*|*[Ee]nable*) percent=85 ;;
             *[Dd]one*|*[Cc]omplet*|*[Ss]uccess*|*[Ff]inish*) percent=97 ;;
+            *[Ee]rror*|*[Ff]ail*) percent=100 ;;
         esac
 
         local char="${spin:$((i % spin_len)):1}"
@@ -244,12 +246,14 @@ uninstall_wireguard() {
 
 uninstall_singbox() {
     echo -e "${YELLOW}[+] Uninstalling Sing-box (V2Ray)...${RESET}"
-    systemctl stop sing-box
-    systemctl disable sing-box
-    rm -rf /etc/systemd/system/sing-box.service
+    systemctl stop eylan-singbox
+    systemctl disable eylan-singbox
+    rm -rf /etc/systemd/system/eylan-singbox.service
     systemctl daemon-reload
-    apt-get remove --purge sing-box -y
-    rm -rf /etc/sing-box /usr/local/bin/sing-box /root/singbox.sh
+    rm -rf /etc/eylan-singbox
+    rm -rf /var/log/eylan-singbox
+    rm -f /etc/logrotate.d/eylan-singbox
+    rm -f /usr/local/bin/eylan-singbox
     echo -e "${GREEN}[✔] Sing-box (V2Ray) has been uninstalled successfully!${RESET}"
 }
 
@@ -282,7 +286,7 @@ check_wireguard_installed() {
 }
 
 check_singbox_installed() {
-    if command -v sing-box &>/dev/null || systemctl list-unit-files 2>/dev/null | grep -q "^sing-box.service"; then
+    if [[ -x /usr/local/bin/eylan-singbox ]] || systemctl list-unit-files 2>/dev/null | grep -q "^eylan-singbox.service"; then
         echo "installed"
     else
         echo "not_installed"
@@ -394,7 +398,7 @@ show_panel_info() {
     echo -e "${YELLOW}To restart WireGuard:${RESET}"
     echo -e "${BLUE}systemctl restart wg-quick@wg1${RESET}"
     echo -e "${YELLOW}To restart Sing-box (V2Ray):${RESET}"
-    echo -e "${BLUE}systemctl restart sing-box${RESET}"
+    echo -e "${BLUE}systemctl restart eylan-singbox${RESET}"
 
     echo -e "\n${CYAN}========= Log Monitoring =========${RESET}"
     echo -e "${YELLOW}OpenVPN Core Logs:${RESET}"
@@ -408,7 +412,8 @@ show_panel_info() {
     echo -e "${YELLOW}WireGuard Logs:${RESET}"
     echo -e "${BLUE}journalctl -u wg-quick@wg1 -e -f${RESET}"
     echo -e "${YELLOW}Sing-box (V2Ray) Logs:${RESET}"
-    echo -e "${BLUE}journalctl -u sing-box -e -f${RESET}"
+    echo -e "${BLUE}journalctl -u eylan-singbox -e -f${RESET}"
+    echo -e "${BLUE}tail -f /var/log/eylan-singbox/access.log${RESET}"
 
     echo -e "\n${CYAN}========= Service Status =========${RESET}"
     
@@ -442,7 +447,7 @@ show_panel_info() {
         echo -e "${RED}[✘] WireGuard (wg1) service is NOT running${RESET}"
     fi
 
-    if systemctl is-active --quiet sing-box; then
+    if systemctl is-active --quiet eylan-singbox; then
         echo -e "${GREEN}[✔] Sing-box (V2Ray) service is running${RESET}"
     else
         echo -e "${RED}[✘] Sing-box (V2Ray) service is NOT running${RESET}"
