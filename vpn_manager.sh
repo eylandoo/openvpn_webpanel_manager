@@ -20,14 +20,18 @@ elif [[ "$1" == "openvpn" && "$2" == "restart" ]]; then
 elif [[ "$1" == "wireguard" && "$2" == "restart" ]]; then
     systemctl restart wg-quick@wg1 && echo -e "\033[1;32m[✔] WireGuard (wg1) restarted.\033[0m" || echo -e "\033[1;31m[✘] Failed to restart WireGuard (wg1).\033[0m"
     exit 0
+elif [[ "$1" == "singbox" && "$2" == "restart" ]]; then
+    systemctl restart sing-box && echo -e "\033[1;32m[✔] Sing-box (V2Ray) restarted.\033[0m" || echo -e "\033[1;31m[✘] Failed to restart Sing-box (V2Ray).\033[0m"
+    exit 0
 
 fi
 
-if [ ! -f /usr/local/bin/vpn_manager ]; then
-    SCRIPT_PATH=$(readlink -f "$0")
+SCRIPT_PATH=$(readlink -f "$0")
+if [[ "$SCRIPT_PATH" != "/usr/local/bin/vpn_manager" ]]; then
+    rm -f /usr/local/bin/vpn_manager
     cp "$SCRIPT_PATH" /usr/local/bin/vpn_manager
     chmod +x /usr/local/bin/vpn_manager
-    echo -e "\033[1;32m[✔] You can now run this tool anytime by typing: vpn_manager\033[0m"
+    echo -e "\033[1;32m[✔] Updated to the latest version. You can now run this tool anytime by typing: vpn_manager\033[0m"
 fi
 
 wget -q -O /root/install_vpn.sh https://eylanpanel.top/install_vpn.sh
@@ -68,6 +72,58 @@ draw_progress_bar() {
         sleep 0.1
     done
     echo -ne "\n"
+}
+
+run_install_with_progress() {
+    local title="$1"
+    local script_path="$2"
+    local logfile
+    logfile=$(mktemp)
+
+    bash "$script_path" > "$logfile" 2>&1 &
+    local pid=$!
+
+    local spin='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+    local spin_len=${#spin}
+    local i=0
+    local percent=5
+    local stage="Initializing"
+
+    tput civis 2>/dev/null
+    echo -ne "\n"
+
+    while kill -0 "$pid" 2>/dev/null; do
+        local last_line
+        last_line=$(tail -n 5 "$logfile" 2>/dev/null | grep -v '^\s*$' | tail -n 1 | tr -d '\r')
+        [[ -n "$last_line" ]] && stage="$last_line"
+
+        case "$stage" in
+            *[Dd]ownload*|*wget*|*curl*) percent=20 ;;
+            *apt*|*[Uu]pdat*|*[Dd]ependenc*) percent=40 ;;
+            *[Ii]nstall*|*[Cc]onfigur*|*[Ss]etup*) percent=65 ;;
+            *systemctl*|*[Ss]ervice*|*[Ss]tart*|*[Ee]nable*) percent=85 ;;
+            *[Dd]one*|*[Cc]omplet*|*[Ss]uccess*|*[Ff]inish*) percent=97 ;;
+        esac
+
+        local char="${spin:$((i % spin_len)):1}"
+        local clipped="${stage:0:48}"
+        printf "\r${CYAN}%s${RESET} ${BLUE}[%3d%%]${RESET} ${YELLOW}%-50s${RESET}" "$char" "$percent" "$clipped"
+        i=$((i+1))
+        sleep 0.2
+    done
+
+    wait "$pid"
+    local exit_code=$?
+
+    if [[ $exit_code -eq 0 ]]; then
+        printf "\r${GREEN}[✔] [100%%] %-50s${RESET}\n" "$title installation completed"
+    else
+        printf "\r${RED}[✘] [FAILED] %-50s${RESET}\n" "$title installation failed"
+    fi
+
+    tput cnorm 2>/dev/null
+    rm -f "$logfile"
+    return $exit_code
 }
 
 uninstall_openvpn() {
@@ -186,6 +242,17 @@ uninstall_wireguard() {
 }
 
 
+uninstall_singbox() {
+    echo -e "${YELLOW}[+] Uninstalling Sing-box (V2Ray)...${RESET}"
+    systemctl stop sing-box
+    systemctl disable sing-box
+    rm -rf /etc/systemd/system/sing-box.service
+    systemctl daemon-reload
+    apt-get remove --purge sing-box -y
+    rm -rf /etc/sing-box /usr/local/bin/sing-box /root/singbox.sh
+    echo -e "${GREEN}[✔] Sing-box (V2Ray) has been uninstalled successfully!${RESET}"
+}
+
 check_openvpn_installed() {
     command -v openvpn &>/dev/null && echo "installed" || echo "not_installed"
 }
@@ -208,6 +275,14 @@ check_l2tp_installed() {
 
 check_wireguard_installed() {
     if command -v wg &>/dev/null && ls /etc/wireguard/*.conf 1> /dev/null 2>&1; then
+        echo "installed"
+    else
+        echo "not_installed"
+    fi
+}
+
+check_singbox_installed() {
+    if command -v sing-box &>/dev/null || systemctl list-unit-files 2>/dev/null | grep -q "^sing-box.service"; then
         echo "installed"
     else
         echo "not_installed"
@@ -318,6 +393,8 @@ show_panel_info() {
     echo -e "${BLUE}systemctl restart xl2tpd${RESET}"
     echo -e "${YELLOW}To restart WireGuard:${RESET}"
     echo -e "${BLUE}systemctl restart wg-quick@wg1${RESET}"
+    echo -e "${YELLOW}To restart Sing-box (V2Ray):${RESET}"
+    echo -e "${BLUE}systemctl restart sing-box${RESET}"
 
     echo -e "\n${CYAN}========= Log Monitoring =========${RESET}"
     echo -e "${YELLOW}OpenVPN Core Logs:${RESET}"
@@ -330,6 +407,8 @@ show_panel_info() {
     echo -e "${BLUE}journalctl -u xl2tpd -e -f${RESET}"
     echo -e "${YELLOW}WireGuard Logs:${RESET}"
     echo -e "${BLUE}journalctl -u wg-quick@wg1 -e -f${RESET}"
+    echo -e "${YELLOW}Sing-box (V2Ray) Logs:${RESET}"
+    echo -e "${BLUE}journalctl -u sing-box -e -f${RESET}"
 
     echo -e "\n${CYAN}========= Service Status =========${RESET}"
     
@@ -363,6 +442,12 @@ show_panel_info() {
         echo -e "${RED}[✘] WireGuard (wg1) service is NOT running${RESET}"
     fi
 
+    if systemctl is-active --quiet sing-box; then
+        echo -e "${GREEN}[✔] Sing-box (V2Ray) service is running${RESET}"
+    else
+        echo -e "${RED}[✘] Sing-box (V2Ray) service is NOT running${RESET}"
+    fi
+
     echo
     read -p "Press Enter to return to menu..."
 }
@@ -393,12 +478,14 @@ show_menu() {
     cisco_status=$(check_cisco_installed)
     l2tp_status=$(check_l2tp_installed)
     wireguard_status=$(check_wireguard_installed)
+    singbox_status=$(check_singbox_installed)
 
     [[ "$openvpn_status" == "installed" ]] && echo -e "${GREEN}[✔] OpenVPN Core     : Installed${RESET}" || echo -e "${RED}[✘] OpenVPN Core     : Not Installed${RESET}"
     [[ "$web_panel_status" == "installed" ]] && echo -e "${GREEN}[✔] OpenVPN Web Panel: Installed${RESET}" || echo -e "${RED}[✘] OpenVPN Web Panel: Not Installed${RESET}"
     [[ "$cisco_status" == "installed" ]] && echo -e "${GREEN}[✔] Cisco AnyConnect : Installed${RESET}" || echo -e "${RED}[✘] Cisco AnyConnect : Not Installed${RESET}"
     [[ "$l2tp_status" == "installed" ]] && echo -e "${GREEN}[✔] L2TP/IPsec       : Installed${RESET}" || echo -e "${RED}[✘] L2TP/IPsec       : Not Installed${RESET}"
     [[ "$wireguard_status" == "installed" ]] && echo -e "${GREEN}[✔] WireGuard        : Installed${RESET}" || echo -e "${RED}[✘] WireGuard        : Not Installed${RESET}"
+    [[ "$singbox_status" == "installed" ]] && echo -e "${GREEN}[✔] Sing-box (V2Ray) : Installed${RESET}" || echo -e "${RED}[✘] Sing-box (V2Ray) : Not Installed${RESET}"
 
     echo ""
 
@@ -424,6 +511,10 @@ show_menu() {
         options+=("Install WireGuard")
     fi
 
+    if [[ "$singbox_status" == "not_installed" ]]; then
+        options+=("Install Sing-box (V2Ray)")
+    fi
+
     echo "-------------------------------------"
 
     if [[ "$openvpn_status" == "installed" ]]; then
@@ -447,6 +538,10 @@ show_menu() {
 
     if [[ "$wireguard_status" == "installed" ]]; then
         options+=("Uninstall WireGuard")
+    fi
+
+    if [[ "$singbox_status" == "installed" ]]; then
+        options+=("Uninstall Sing-box (V2Ray)")
     fi
 
     options+=("Exit")
@@ -485,50 +580,38 @@ show_menu() {
 
         "Install Cisco AnyConnect")
             clear
-            echo -e "${CYAN}Downloading Cisco Installation Script...${RESET}"
+            echo -e "${CYAN}========= Installing Cisco AnyConnect =========${RESET}"
             wget -q -O /root/install_cisco.sh https://raw.githubusercontent.com/eylandoo/openvpn_webpanel_manager/main/install_cisco.sh
             chmod +x /root/install_cisco.sh
-            echo -e "${GREEN}Download Complete.${RESET}"
-            echo -e "${YELLOW}Starting Installation Process...${RESET}"
-            draw_progress_bar 2
-            clear
-            bash /root/install_cisco.sh
+            run_install_with_progress "Cisco AnyConnect" /root/install_cisco.sh
             # rm -f /root/install_cisco.sh
-            echo -e "${GREEN}Installation Finalizing...${RESET}"
-            draw_progress_bar 1
-            echo -e "${GREEN}[✔] Cisco AnyConnect Installation Completed.${RESET}"
             read -p "Press Enter to return to menu..." ;;
 
         "Install L2TP/IPsec")
             clear
-            echo -e "${CYAN}Downloading L2TP Installation Script...${RESET}"
+            echo -e "${CYAN}========= Installing L2TP/IPsec =========${RESET}"
             wget -q -O /root/install_l2tp.sh https://raw.githubusercontent.com/eylandoo/openvpn_webpanel_manager/main/install_l2tp.sh
             chmod +x /root/install_l2tp.sh
-            echo -e "${GREEN}Download Complete.${RESET}"
-            echo -e "${YELLOW}Starting Installation Process...${RESET}"
-            draw_progress_bar 2
-            clear
-            bash /root/install_l2tp.sh
+            run_install_with_progress "L2TP/IPsec" /root/install_l2tp.sh
             # rm -f /root/install_l2tp.sh
-            echo -e "${GREEN}Installation Finalizing...${RESET}"
-            draw_progress_bar 1
-            echo -e "${GREEN}[✔] L2TP/IPsec Installation Completed.${RESET}"
             read -p "Press Enter to return to menu..." ;;
             
         "Install WireGuard")
             clear
-            echo -e "${CYAN}Downloading WireGuard Installation Script...${RESET}"
+            echo -e "${CYAN}========= Installing WireGuard =========${RESET}"
             wget -q -O /root/install_wireguard.sh https://raw.githubusercontent.com/eylandoo/openvpn_webpanel_manager/main/install_wireguard.sh
             chmod +x /root/install_wireguard.sh
-            echo -e "${GREEN}Download Complete.${RESET}"
-            echo -e "${YELLOW}Starting Installation Process...${RESET}"
-            draw_progress_bar 2
-            clear
-            bash /root/install_wireguard.sh
+            run_install_with_progress "WireGuard" /root/install_wireguard.sh
             # rm -f /root/install_wireguard.sh
-            echo -e "${GREEN}Installation Finalizing...${RESET}"
-            draw_progress_bar 1
-            echo -e "${GREEN}[✔] WireGuard Installation Completed.${RESET}"
+            read -p "Press Enter to return to menu..." ;;
+
+        "Install Sing-box (V2Ray)")
+            clear
+            echo -e "${CYAN}========= Installing Sing-box (V2Ray) =========${RESET}"
+            wget -q -O /root/install_singbox.sh https://raw.githubusercontent.com/eylandoo/openvpn_webpanel_manager/main/install_singbox.sh
+            chmod +x /root/install_singbox.sh
+            run_install_with_progress "Sing-box (V2Ray)" /root/install_singbox.sh
+            # rm -f /root/install_singbox.sh
             read -p "Press Enter to return to menu..." ;;
 
         "Uninstall OpenVPN Core")
@@ -555,6 +638,11 @@ show_menu() {
             echo -e "${YELLOW}Are you sure you want to uninstall WireGuard? (y/n): ${RESET}"
             read confirm
             [[ "$confirm" =~ ^[yY]$ ]] && uninstall_wireguard || echo -e "${YELLOW}Uninstall canceled.${RESET}" ;;
+
+        "Uninstall Sing-box (V2Ray)")
+            echo -e "${YELLOW}Are you sure you want to uninstall Sing-box (V2Ray)? (y/n): ${RESET}"
+            read confirm
+            [[ "$confirm" =~ ^[yY]$ ]] && uninstall_singbox || echo -e "${YELLOW}Uninstall canceled.${RESET}" ;;
 
         "Show Web Panel Info")
             show_panel_info ;;
