@@ -2270,9 +2270,10 @@ class StatusHandler(BaseHTTPRequestHandler):
                 for line in new_lines:
                     m_from = SINGBOX_LOG_FROM_RE.search(line)
                     if m_from:
-                        ctx_id, tag, ip, _port = m_from.groups()
+                        ctx_id, tag, ip, port = m_from.groups()
                         entry = SINGBOX_LOG_CONTEXT_CACHE.setdefault(ctx_id, {})
                         entry["source_ip"] = ip
+                        entry["source_port"] = port
                         entry["inbound_tag"] = tag
                         entry["seen_at"] = now
                         continue
@@ -2299,20 +2300,22 @@ class StatusHandler(BaseHTTPRequestHandler):
             return sessions
 
         ip_to_user = {}
-        ip_to_tag = {}
+        ip_port_to_tag = {}
         for entry in SINGBOX_LOG_CONTEXT_CACHE.values():
             ip = entry.get("source_ip")
+            port = entry.get("source_port")
             uname = entry.get("username")
             if ip and uname:
                 ip_to_user[ip] = uname
-            if ip and entry.get("inbound_tag"):
-                ip_to_tag[ip] = entry["inbound_tag"]
+            if ip and port and entry.get("inbound_tag"):
+                ip_port_to_tag[(ip, str(port))] = entry["inbound_tag"]
 
         agg = {}
         for conn in snapshot.get("connections") or []:
             try:
                 meta = conn.get("metadata", {})
                 source_ip = meta.get("sourceIP")
+                source_port = meta.get("sourcePort")
                 username = ip_to_user.get(source_ip)
                 if not username or not source_ip:
                     continue
@@ -2321,7 +2324,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                 upload = conn.get("upload", 0) or 0
                 key = (username, source_ip)
                 conn_start = _singbox_parse_conn_start(conn.get("start"))
-                inbound_tag = ip_to_tag.get(source_ip)
+                inbound_tag = ip_port_to_tag.get((source_ip, str(source_port))) if source_port else None
                 if key not in agg:
                     agg[key] = {
                         "username": username,
@@ -2338,6 +2341,8 @@ class StatusHandler(BaseHTTPRequestHandler):
                     }
                 elif conn_start < agg[key]["connected_at"]:
                     agg[key]["connected_at"] = conn_start
+                if not agg[key].get("inbound_tag") and inbound_tag:
+                    agg[key]["inbound_tag"] = inbound_tag
                 agg[key]["bytes_received"] += upload
                 agg[key]["bytes_sent"] += download
 
