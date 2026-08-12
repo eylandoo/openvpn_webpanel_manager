@@ -1,21 +1,41 @@
 # OVPN Manager: A High-Performance Multi-Protocol Web Panel
 
-[![Python](https://img.shields.io/badge/Python-3.9+-blue?logo=python)](https://www.python.org/)
-[![Flask](https://img.shields.io/badge/Flask-2.x-black?logo=flask)](https://flask.palletsprojects.com/)
-[![Tailwind CSS](https://img.shields.io/badge/UI-Tailwind_CSS-38B2AC?logo=tailwind-css)](https://tailwindcss.com/)
-[![License: All Rights Reserved](https://img.shields.io/badge/License-All_Rights_Reserved-blue)](LICENSE)
+[
 
-**OVPN Manager 3.0.0** is a comprehensive, self-hosted web panel built on Flask, engineered for high scalability and stability. It centralizes the management of not just OpenVPN, but also **Cisco AnyConnect (Ocserv)**, **L2TP/IPsec**, and now **WireGuard (wg1)**.  
+![Python](https://img.shields.io/badge/Python-3.9+-blue?logo=python)
+
+](https://www.python.org/)
+[
+
+![Flask](https://img.shields.io/badge/Flask-2.x-black?logo=flask)
+
+](https://flask.palletsprojects.com/)
+[
+
+![Tailwind CSS](https://img.shields.io/badge/UI-Tailwind_CSS-38B2AC?logo=tailwind-css)
+
+](https://tailwindcss.com/)
+[
+
+![License: All Rights Reserved](https://img.shields.io/badge/License-All_Rights_Reserved-blue)
+
+](LICENSE)
+
+**OVPN Manager 4.0.0** is a comprehensive, self-hosted web panel built on Flask, engineered for high scalability and stability. It centralizes the management of not just OpenVPN, but also **Cisco AnyConnect (Ocserv)**, **L2TP/IPsec**, **WireGuard (wg1)**, and now **Sing-box (VMess, VLESS, Shadowsocks, Trojan, Hysteria2)**.  
 This major update transforms the panel into a high-performance solution for managing users, resellers, and multi-node deployments across diverse VPN protocols.
 
 The panel is designed for administrators demanding granular control over user access, traffic, and server resources with a focus on core architecture stability.
 
 ### 📸 Dashboard Preview
 
+
+
 ![OVPN Manager Dashboard](https://uploadkon.ir/uploads/803c11_25eylanpanel.png)
+
+
 ---
 
-## ✨ Key Features (v3.0.0 Update)
+## ✨ Key Features (v4.0.0 Update)
 
 ### 🛡️ Multi-Protocol & Core Stability
 * **Multi-Protocol Support**: Full integration and management for:
@@ -23,6 +43,7 @@ The panel is designed for administrators demanding granular control over user ac
     * **Cisco AnyConnect (Ocserv)**
     * **L2TP/IPsec**
     * **WireGuard (wg1 and wg2 and ...)**
+    * **Sing-box** — supporting **VMess**, **VLESS**, **Shadowsocks**, **Trojan**, and **Hysteria2** transports, with full **Reality** and **TLS** configuration
 * **Database Scalability**: Added core support for **PostgreSQL** alongside SQLite. Includes a **Smart Migration Engine** to securely and automatically transfer all existing user data from SQLite to PostgreSQL for high-load environments.
 * **Persistent Security Key**: Implemented a security fix to store the `SECRET_KEY` persistently, enhancing session security and preventing forced admin logouts after service restarts.
 * **Concurrency Fixes**: Major architectural upgrade with the implementation of `DB_WRITE_LOCK` and `GLOBAL_SYNC_LOCK` to eliminate deadlocks and database corruption under high traffic/activity.
@@ -31,6 +52,7 @@ The panel is designed for administrators demanding granular control over user ac
 * **Create Users**: Add single or bulk users.
 * **Protocol-Specific Passwords**: Set unique passwords for L2TP and Cisco for each user.
 * **WireGuard User Data**: Automatically manage WireGuard (wg1) user requirements (keys/IP) alongside other protocols.
+* **Sing-box User Data**: Automatically manage Sing-box inbound assignments (VMess/VLESS/Shadowsocks/Trojan/Hysteria2) with per-user shareable subscription links.
 * **Detailed Limits**: Set specific limits for each user:
     * **Data Limit**: Assign quotas in GB or MB.
     * **Connection Limit**: Define the maximum number of simultaneous connections (per protocol).
@@ -43,18 +65,20 @@ The panel is designed for administrators demanding granular control over user ac
 * **Create Sub-Admins**: Main admin can create sub-admin (reseller) accounts.
 * **Assign Quotas**: Set limits for each sub-admin, including maximum number of users they can create and a total data quota they can assign.
 * **Independent Management**: Sub-admins manage their own users within the limits you've set.
+* **Usage Analytics**: Dedicated daily, weekly, monthly, and custom date-range usage reports per sub-admin.
 
 ### Multi-Node Support
-* **Centralized Control**: Manage and sync users across multiple servers (nodes) for OpenVPN, Cisco, L2TP, and WireGuard from a single main panel.
+* **Centralized Control**: Manage and sync users across multiple servers (nodes) for OpenVPN, Cisco, L2TP, WireGuard, and Sing-box from a single main panel.
 * **Node Health Monitoring**: View the live status of all connected nodes.
 * **Protocol Provisioning**: New nodes are intelligently configured to support all enabled protocols automatically during setup.
-* **Tunnel Visibility**: Granular control to show/hide specific protocol configurations (OpenVPN, Cisco, L2TP, WireGuard) for users connected to a particular tunnel.
+* **Tunnel Visibility**: Granular control to show/hide specific protocol configurations (OpenVPN, Cisco, L2TP, WireGuard, Sing-box) for users connected to a particular tunnel.
 
 ### Server & Panel Administration
 * **Scheduler Upgrade**: Switched from `GeventExecutor` to **`ThreadPoolExecutor`** for background jobs, significantly improving the stability and responsiveness of the panel under load.
 * **Enhanced SSL Management**: Includes a re-written SSL engine with advanced support for SNI (Server Name Indication) and automated "Double-Tap Restart" to ensure smooth certificate renewal and application.
-* **Backup & Restore**: Create full backups, now including configurations and user data for all supported protocols (OpenVPN, Cisco, L2TP, WireGuard).
-* **Advanced Configuration**: Directly edit configuration files for the main server and each node, including `server.conf`, `ocserv.conf`, IPsec settings, and WireGuard configuration as applicable.
+* **Backup & Restore**: Create full backups, now including configurations and user data for all supported protocols (OpenVPN, Cisco, L2TP, WireGuard, Sing-box).
+* **Advanced Configuration**: Directly edit configuration files for the main server and each node, including `server.conf`, `ocserv.conf`, IPsec settings, WireGuard configuration, and Sing-box inbound configuration as applicable.
+* **Panel Branding**: Customize the panel title and upload a custom logo.
 * **Customization**: Change the panel port, set a custom admin URL path, and switch between dark and light themes.
 
 ### API
@@ -68,7 +92,7 @@ The panel is a robust Flask application acting as the central management brain.
 
 * **Backend**: **Flask**, **Gevent** (for WSGI), **SQLAlchemy** (for database ORM)
 * **Database**: **PostgreSQL** (Recommended for scale) or **SQLite**
-* **Core Management**: Interacts directly with `systemctl` and dedicated scripts for managing **OpenVPN**, **Ocserv**, **Libreswan (L2TP/IPsec)**, and **WireGuard (wg1)** services.
+* **Core Management**: Interacts directly with `systemctl` and dedicated scripts for managing **OpenVPN**, **Ocserv**, **Libreswan (L2TP/IPsec)**, **WireGuard (wg1)**, and **Sing-box (VMess/VLESS/Shadowsocks/Trojan/Hysteria2)** services.
 * **Frontend**: **Tailwind CSS**, **Font Awesome**, Vanilla JavaScript
 * **Scheduling**: **APScheduler** utilizing **ThreadPoolExecutor** for high-stability background tasks.
 
@@ -88,11 +112,10 @@ Connect to your server via SSH and run the single command below. This will downl
 ```bash
 wget -q -O /root/vpn_manager.sh https://raw.githubusercontent.com/eylandoo/openvpn_webpanel_manager/main/vpn_manager.sh && chmod +x /root/vpn_manager.sh && /root/vpn_manager.sh
 ```
-
 ### Step 2: Install VPN Cores
 After running the command, an interactive menu will appear.
 
-1. Select the **Install OpenVPN Core**, **Install Cisco AnyConnect**, **Install L2TP/IPsec** , or **Install Wireguard** option(s).
+1. Select the **Install OpenVPN Core**, **Install Cisco AnyConnect**, **Install L2TP/IPsec** , **Install Wireguard** , or Install Sing-box option(s).
 2. Follow the prompts to configure the desired protocols.
 3. The script will handle all installations automatically.
 
