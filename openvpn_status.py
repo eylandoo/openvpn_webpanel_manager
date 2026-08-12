@@ -16,6 +16,8 @@ import tempfile
 import threading
 import fcntl
 import re
+import urllib.request
+import urllib.error
 
 PORT = 7506
 OPENVPN_CONF_DIR = "/etc/openvpn/server/"
@@ -36,6 +38,25 @@ WG1_HANDSHAKE_TIMEOUT = 120
 WG1_TRAFFIC_TIMEOUT = 10
 WG1_PEER_ACTIVITY = {}
 WG_INSTANCE_PEER_ACTIVITY = {}
+
+WG_KILL_STRIKES = {}
+WG_KILL_STRIKES_LOCK = threading.Lock()
+WG_STRIKE_WINDOW_SECONDS = 60
+
+WG_KICK_GENERATION = {}
+WG_KICK_GENERATION_LOCK = threading.Lock()
+
+WG_TEMP_BLOCKED_UNTIL = {}
+WG_TEMP_BLOCKED_UNTIL_LOCK = threading.Lock()
+
+
+def _wg_should_block_after_kill(username, instance_name, pubkey):
+    key = username
+    now = time.time()
+    with WG_KILL_STRIKES_LOCK:
+        last = WG_KILL_STRIKES.get(key)
+        WG_KILL_STRIKES[key] = now
+        return last is not None and (now - last) < WG_STRIKE_WINDOW_SECONDS
 WG1_DB_MUTEX = threading.RLock()
 WG1_DB_LAST_ERR_LOG = 0.0
 WG1_DB_ERR_LOG_EVERY = 10.0
@@ -54,6 +75,58 @@ def _is_valid_wg_instance_name(name):
 L2TP_SESSION_CACHE = {}
 L2TP_CACHE_LOCK = threading.Lock()
 DETAILED_LOCK = threading.Lock()
+
+SINGBOX_CONFIG_PATH = "/etc/eylan-singbox/config.json"
+SINGBOX_LOG_PATH = "/var/log/eylan-singbox/access.log"
+SINGBOX_SERVICE_NAME = "eylan-singbox"
+SINGBOX_CLASH_API = "http://127.0.0.1:9190"
+SINGBOX_LOCAL_LOCK = threading.RLock()
+SINGBOX_GUARD_TABLE = "eylan_singbox_guard"
+SINGBOX_GUARD_RULE_COMMENT = "eylan-singbox-guard-rule"
+
+SINGBOX_KILL_STRIKES = {}
+SINGBOX_KILL_STRIKES_LOCK = threading.Lock()
+SINGBOX_STRIKE_WINDOW_SECONDS = 60
+
+
+def _singbox_should_block_after_kill(username, source_ip):
+    key = username
+    now = time.time()
+    with SINGBOX_KILL_STRIKES_LOCK:
+        last = SINGBOX_KILL_STRIKES.get(key)
+        SINGBOX_KILL_STRIKES[key] = now
+        return last is not None and (now - last) < SINGBOX_STRIKE_WINDOW_SECONDS
+
+SINGBOX_LOG_CONTEXT_CACHE = {}
+SINGBOX_LOG_LOCK = threading.Lock()
+SINGBOX_LOG_LAST_OFFSET = 0
+
+SINGBOX_LOG_FROM_RE = re.compile(
+    r'\[(\d+)\s+\d+ms\]\s+inbound/\w+\[([^\]]+)\]:\s+inbound (?:connection|packet connection) from\s+([0-9a-fA-F:.]+):(\d+)'
+)
+SINGBOX_LOG_USER_RE = re.compile(
+    r'\[(\d+)\s+\d+ms\]\s+inbound/\w+\[([^\]]+)\]:\s+\[([^\]]*)\]\s+inbound (?:connection|packet)'
+)
+
+SINGBOX_CONN_START_RE = re.compile(r'^(.*T\d{2}:\d{2}:\d{2})\.(\d+)(.*)$')
+
+SINGBOX_CONN_FIRST_SEEN = {}
+SINGBOX_CONN_FIRST_SEEN_LOCK = threading.Lock()
+
+
+def _singbox_parse_conn_start(start_val):
+    if isinstance(start_val, (int, float)) and start_val > 0:
+        return float(start_val)
+    if isinstance(start_val, str) and start_val:
+        try:
+            cleaned = start_val.replace("Z", "+00:00")
+            m = SINGBOX_CONN_START_RE.match(cleaned)
+            if m:
+                cleaned = f"{m.group(1)}.{m.group(2)[:6]}{m.group(3)}"
+            return datetime.datetime.fromisoformat(cleaned).timestamp()
+        except Exception:
+            pass
+    return time.time()
 
 
 GLOBAL_DATA_STORE = {
@@ -1029,6 +1102,57 @@ class StatusHandler(BaseHTTPRequestHandler):
 
         return True
 
+    def _wg1_temp_kick_peer(self, pub_key, duration_seconds=200):
+        if not pub_key:
+            return False
+        pub = str(pub_key).strip()
+        key = ("wg1", pub)
+        with WG_KICK_GENERATION_LOCK:
+            gen = WG_KICK_GENERATION.get(key, 0) + 1
+            WG_KICK_GENERATION[key] = gen
+
+        with WG_TEMP_BLOCKED_UNTIL_LOCK:
+            WG_TEMP_BLOCKED_UNTIL[key] = time.time() + duration_seconds
+
+        db = self._wg1_load_peers_db()
+        info = None
+        for _u, d in (db or {}).items():
+            try:
+                if isinstance(d, dict) and str(d.get("public_key") or "").strip() == pub:
+                    info = d
+                    break
+            except:
+                pass
+
+        try:
+            WG1_PEER_ACTIVITY.pop(pub, None)
+        except:
+            pass
+
+        self._wg1_remove_peer(pub)
+
+        if isinstance(info, dict) and not bool(info.get("disabled")):
+            allowed = (
+                info.get("allowed_ips")
+                or info.get("allowed_ip")
+                or info.get("allowed_ips_v4")
+                or info.get("ip")
+                or info.get("wg1_ip")
+            )
+            psk = info.get("preshared_key")
+
+            def _restore():
+                with WG_KICK_GENERATION_LOCK:
+                    if WG_KICK_GENERATION.get(key) != gen:
+                        return
+                with WG_TEMP_BLOCKED_UNTIL_LOCK:
+                    WG_TEMP_BLOCKED_UNTIL.pop(key, None)
+                self._wg1_set_peer(pub, allowed_ips=allowed, preshared_key=psk, reset_first=False)
+
+            threading.Timer(duration_seconds, _restore).start()
+
+        return True
+
     def _extract_wg_sessions(self, detailed_users):
         sessions = []
         peers_map = self._wg1_load_peers_db()
@@ -1083,7 +1207,7 @@ class StatusHandler(BaseHTTPRequestHandler):
 
                 username, _uinfo = u
                 endpoint_present = bool(endpoint)
-                fresh_handshake = bool(latest_handshake > 0 and (now_ts - latest_handshake) <= 10)
+                fresh_handshake = bool(latest_handshake > 0 and (now_ts - latest_handshake) <= 45)
 
                 prev = WG1_PEER_ACTIVITY.get(pub_key)
                 if prev is None:
@@ -1134,7 +1258,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                         prev["endpoint"] = endpoint
 
                 last_activity = float(prev.get("last_activity", 0) or 0)
-                recent_activity = bool(last_activity > 0 and (float(now_ts) - last_activity) <= 10)
+                recent_activity = bool(last_activity > 0 and (float(now_ts) - last_activity) <= 45)
                 online = bool(recent_activity or (fresh_handshake and endpoint_present))
 
                 was_online = bool(prev.get("online"))
@@ -1455,6 +1579,55 @@ class StatusHandler(BaseHTTPRequestHandler):
             return True
         return True
 
+    def _wg_instance_temp_kick_peer(self, instance_name, pub_key, duration_seconds=200):
+        if not pub_key:
+            return False
+        pub = str(pub_key).strip()
+        key = (instance_name, pub)
+        with WG_KICK_GENERATION_LOCK:
+            gen = WG_KICK_GENERATION.get(key, 0) + 1
+            WG_KICK_GENERATION[key] = gen
+
+        with WG_TEMP_BLOCKED_UNTIL_LOCK:
+            WG_TEMP_BLOCKED_UNTIL[key] = time.time() + duration_seconds
+
+        db = self._wg_instance_load_peers_db(instance_name)
+        info = None
+        for _u, d in (db or {}).items():
+            try:
+                if isinstance(d, dict) and str(d.get("public_key") or "").strip() == pub:
+                    info = d
+                    break
+            except Exception:
+                pass
+
+        try:
+            WG_INSTANCE_PEER_ACTIVITY.pop(f"{instance_name}:{pub}", None)
+        except Exception:
+            pass
+
+        self._wg_instance_remove_peer(instance_name, pub)
+
+        if isinstance(info, dict) and not bool(info.get("disabled")):
+            allowed = info.get("allowed_ip") or info.get("allowed_ips")
+            allowed_norm = self._wg_instance_normalize_allowed_ips(allowed)
+
+            def _restore():
+                with WG_KICK_GENERATION_LOCK:
+                    if WG_KICK_GENERATION.get(key) != gen:
+                        return
+                with WG_TEMP_BLOCKED_UNTIL_LOCK:
+                    WG_TEMP_BLOCKED_UNTIL.pop(key, None)
+                if allowed_norm:
+                    subprocess.run(
+                        ["wg", "set", instance_name, "peer", pub, "allowed-ips", allowed_norm],
+                        check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10
+                    )
+
+            threading.Timer(duration_seconds, _restore).start()
+
+        return True
+
     def _update_listen_port_in_file(self, path, port):
         try:
             if not os.path.exists(path):
@@ -1680,7 +1853,7 @@ class StatusHandler(BaseHTTPRequestHandler):
 
                 activity_key = f"{instance_name}:{pub_key}"
                 endpoint_present = bool(endpoint)
-                fresh_handshake = bool(latest_handshake > 0 and (now_ts - latest_handshake) <= 10)
+                fresh_handshake = bool(latest_handshake > 0 and (now_ts - latest_handshake) <= 45)
 
                 prev = WG_INSTANCE_PEER_ACTIVITY.get(activity_key)
                 if prev is None:
@@ -1727,7 +1900,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                         prev["endpoint"] = endpoint
 
                 last_activity = float(prev.get("last_activity", 0) or 0)
-                recent_activity = bool(last_activity > 0 and (float(now_ts) - last_activity) <= 10)
+                recent_activity = bool(last_activity > 0 and (float(now_ts) - last_activity) <= 45)
                 online = bool(recent_activity or (fresh_handshake and endpoint_present))
 
                 was_online = bool(prev.get("online"))
@@ -1931,6 +2104,372 @@ class StatusHandler(BaseHTTPRequestHandler):
 
         except Exception as e:
             return False, f"Cisco Error: {str(e)}"
+
+
+    def _singbox_load_config(self):
+        try:
+            with open(SINGBOX_CONFIG_PATH, 'r') as f:
+                return json.load(f)
+        except Exception:
+            return {"log": {"level": "info"}, "inbounds": [], "outbounds": [{"type": "direct", "tag": "direct"}]}
+
+    def _singbox_save_config(self, config):
+        tmp_path = f"{SINGBOX_CONFIG_PATH}.tmp{os.getpid()}"
+        with open(tmp_path, "w") as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, SINGBOX_CONFIG_PATH)
+
+    def _singbox_reload(self):
+        try:
+            subprocess.run(["systemctl", "reload", SINGBOX_SERVICE_NAME], check=False, timeout=10)
+            return True
+        except Exception:
+            return False
+
+    def _handle_singbox_single(self, cmd):
+        uname = (cmd.get("username") or "").strip()
+        inbound_tag = (cmd.get("inbound_tag") or "").strip()
+        credential = cmd.get("credential")
+        flow = cmd.get("flow")
+        action = (cmd.get("action") or "add").strip().lower()
+
+        if not uname or not inbound_tag:
+            return False, "Missing username or inbound_tag"
+
+        try:
+            with SINGBOX_LOCAL_LOCK:
+                config = self._singbox_load_config()
+                target = None
+                for inb in config.get("inbounds", []):
+                    if inb.get("tag") == inbound_tag:
+                        target = inb
+                        break
+
+                if target is None:
+                    return True, f"Inbound '{inbound_tag}' not hosted on this server, skipped"
+
+                users_list = target.setdefault("users", [])
+                users_list[:] = [u for u in users_list if u.get("name") != uname]
+
+                if action in ("add", "update"):
+                    if not credential:
+                        return False, "Missing credential for add/update"
+                    entry = {"name": uname}
+                    if target.get("type") in ("vless", "vmess"):
+                        entry["uuid"] = credential
+                        if target.get("type") == "vless" and flow:
+                            entry["flow"] = flow
+                    else:
+                        entry["password"] = credential
+                    users_list.append(entry)
+                elif action != "delete":
+                    return False, f"Unknown action: {action}"
+
+                self._singbox_save_config(config)
+
+            self._singbox_reload()
+            return True, f"sing-box user {uname} {action} on {inbound_tag} done"
+        except Exception as e:
+            return False, f"sing-box Error: {str(e)}"
+
+    def _handle_singbox_inbound_provision(self, cmd):
+        inbound_def = cmd.get("inbound_definition")
+        if not inbound_def or not inbound_def.get("tag"):
+            return False, "Missing inbound_definition/tag"
+        try:
+            with SINGBOX_LOCAL_LOCK:
+                config = self._singbox_load_config()
+                inbounds = config.get("inbounds", [])
+                inbounds[:] = [i for i in inbounds if i.get("tag") != inbound_def["tag"]]
+                inbound_def.setdefault("users", [])
+                inbounds.append(inbound_def)
+                config["inbounds"] = inbounds
+                self._singbox_save_config(config)
+            self._singbox_reload()
+            return True, f"Inbound {inbound_def['tag']} provisioned"
+        except Exception as e:
+            return False, f"sing-box provision error: {str(e)}"
+
+    def _handle_singbox_inbound_remove(self, cmd):
+        tag = (cmd.get("inbound_tag") or "").strip()
+        if not tag:
+            return False, "Missing inbound_tag"
+        try:
+            with SINGBOX_LOCAL_LOCK:
+                config = self._singbox_load_config()
+                inbounds = config.get("inbounds", [])
+                before = len(inbounds)
+                inbounds[:] = [i for i in inbounds if i.get("tag") != tag]
+                config["inbounds"] = inbounds
+                self._singbox_save_config(config)
+            self._singbox_reload()
+            removed = before != len(inbounds)
+            return True, f"Inbound {tag} removed" if removed else f"Inbound {tag} was not present"
+        except Exception as e:
+            return False, f"sing-box remove error: {str(e)}"
+
+    def _handle_singbox_sync_inbound_users(self, cmd):
+        tag = (cmd.get("inbound_tag") or "").strip()
+        users = cmd.get("users")
+        if not tag or users is None:
+            return False, "Missing inbound_tag or users"
+        try:
+            with SINGBOX_LOCAL_LOCK:
+                config = self._singbox_load_config()
+                target = None
+                for inb in config.get("inbounds", []):
+                    if inb.get("tag") == tag:
+                        target = inb
+                        break
+                if target is None:
+                    return True, f"Inbound '{tag}' not hosted on this server, skipped"
+                target["users"] = users
+                self._singbox_save_config(config)
+            self._singbox_reload()
+            return True, f"Synced {len(users)} user(s) on {tag}"
+        except Exception as e:
+            return False, f"sing-box sync error: {str(e)}"
+
+    def _singbox_clash_api_get(self, path):
+        try:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            req = urllib.request.Request(f"{SINGBOX_CLASH_API}{path}")
+            with opener.open(req, timeout=5) as resp:
+                return json.loads(resp.read().decode())
+        except Exception:
+            return None
+
+    def _singbox_clash_api_delete(self, path):
+        try:
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            req = urllib.request.Request(f"{SINGBOX_CLASH_API}{path}", method="DELETE")
+            with opener.open(req, timeout=5):
+                return True
+        except Exception:
+            return False
+
+    def _singbox_tail_log_and_update_cache(self):
+        global SINGBOX_LOG_LAST_OFFSET
+        if not os.path.exists(SINGBOX_LOG_PATH):
+            return
+
+        try:
+            with SINGBOX_LOG_LOCK:
+                file_size = os.path.getsize(SINGBOX_LOG_PATH)
+                if file_size < SINGBOX_LOG_LAST_OFFSET:
+                    SINGBOX_LOG_LAST_OFFSET = 0
+
+                with open(SINGBOX_LOG_PATH, 'r', errors='ignore') as f:
+                    f.seek(SINGBOX_LOG_LAST_OFFSET)
+                    new_lines = f.readlines()
+                    SINGBOX_LOG_LAST_OFFSET = f.tell()
+
+                now = time.time()
+                for line in new_lines:
+                    m_from = SINGBOX_LOG_FROM_RE.search(line)
+                    if m_from:
+                        ctx_id, tag, ip, _port = m_from.groups()
+                        entry = SINGBOX_LOG_CONTEXT_CACHE.setdefault(ctx_id, {})
+                        entry["source_ip"] = ip
+                        entry["inbound_tag"] = tag
+                        entry["seen_at"] = now
+                        continue
+                    m_user = SINGBOX_LOG_USER_RE.search(line)
+                    if m_user:
+                        ctx_id, tag, uname = m_user.groups()
+                        entry = SINGBOX_LOG_CONTEXT_CACHE.setdefault(ctx_id, {})
+                        entry["username"] = uname
+                        entry["inbound_tag"] = tag
+                        entry["seen_at"] = now
+
+                stale = [k for k, v in SINGBOX_LOG_CONTEXT_CACHE.items() if now - v.get("seen_at", 0) > 600]
+                for k in stale:
+                    del SINGBOX_LOG_CONTEXT_CACHE[k]
+        except Exception:
+            pass
+
+    def _extract_singbox_sessions(self, detailed_users):
+        sessions = []
+        self._singbox_tail_log_and_update_cache()
+
+        snapshot = self._singbox_clash_api_get("/connections")
+        if not snapshot or "connections" not in snapshot:
+            return sessions
+
+        ip_to_user = {}
+        ip_to_tag = {}
+        for entry in SINGBOX_LOG_CONTEXT_CACHE.values():
+            ip = entry.get("source_ip")
+            uname = entry.get("username")
+            if ip and uname:
+                ip_to_user[ip] = uname
+            if ip and entry.get("inbound_tag"):
+                ip_to_tag[ip] = entry["inbound_tag"]
+
+        agg = {}
+        for conn in snapshot.get("connections") or []:
+            try:
+                meta = conn.get("metadata", {})
+                source_ip = meta.get("sourceIP")
+                username = ip_to_user.get(source_ip)
+                if not username or not source_ip:
+                    continue
+
+                download = conn.get("download", 0) or 0
+                upload = conn.get("upload", 0) or 0
+                key = (username, source_ip)
+                conn_start = _singbox_parse_conn_start(conn.get("start"))
+                inbound_tag = ip_to_tag.get(source_ip)
+                if key not in agg:
+                    agg[key] = {
+                        "username": username,
+                        "protocol": "SINGBOX",
+                        "ip": source_ip,
+                        "v_ip": "",
+                        "interface": meta.get("type", "singbox"),
+                        "bytes_received": 0,
+                        "bytes_sent": 0,
+                        "connected_at": conn_start,
+                        "session_id": source_ip,
+                        "source": "node",
+                        "inbound_tag": inbound_tag
+                    }
+                elif conn_start < agg[key]["connected_at"]:
+                    agg[key]["connected_at"] = conn_start
+                agg[key]["bytes_received"] += upload
+                agg[key]["bytes_sent"] += download
+
+                legacy_key = f"sing-box:{inbound_tag}" if inbound_tag else "sing-box"
+                with DETAILED_LOCK:
+                    if username not in detailed_users:
+                        detailed_users[username] = {}
+                    if legacy_key not in detailed_users[username]:
+                        detailed_users[username][legacy_key] = {"active": 0, "bytes_received": 0, "bytes_sent": 0}
+                    detailed_users[username][legacy_key]["bytes_received"] += upload
+                    detailed_users[username][legacy_key]["bytes_sent"] += download
+            except Exception:
+                continue
+
+        now_epoch = time.time()
+        with SINGBOX_CONN_FIRST_SEEN_LOCK:
+            for key, sess in agg.items():
+                cached = SINGBOX_CONN_FIRST_SEEN.get(key)
+                if cached is None:
+                    SINGBOX_CONN_FIRST_SEEN[key] = {"first_seen": sess["connected_at"], "last_seen": now_epoch}
+                else:
+                    sess["connected_at"] = cached["first_seen"]
+                    cached["last_seen"] = now_epoch
+            for stale_key, entry in list(SINGBOX_CONN_FIRST_SEEN.items()):
+                if now_epoch - entry.get("last_seen", 0) > 90:
+                    SINGBOX_CONN_FIRST_SEEN.pop(stale_key, None)
+
+        for key, sess in agg.items():
+            username = key[0]
+            legacy_key = f"sing-box:{sess.get('inbound_tag')}" if sess.get("inbound_tag") else "sing-box"
+            with DETAILED_LOCK:
+                if username in detailed_users and legacy_key in detailed_users[username]:
+                    detailed_users[username][legacy_key]["active"] += 1
+            sessions.append(sess)
+
+        return sessions
+
+    def _singbox_kill_connections_for_user(self, username):
+        snapshot = self._singbox_clash_api_get("/connections")
+        if not snapshot:
+            return 0
+        ip_to_user = {}
+        for entry in SINGBOX_LOG_CONTEXT_CACHE.values():
+            ip = entry.get("source_ip")
+            uname = entry.get("username")
+            if ip and uname:
+                ip_to_user[ip] = uname
+
+        killed = 0
+        for conn in snapshot.get("connections") or []:
+            meta = conn.get("metadata", {})
+            if ip_to_user.get(meta.get("sourceIP")) == username:
+                if self._singbox_clash_api_delete(f"/connections/{conn.get('id')}"):
+                    killed += 1
+        return killed
+
+    def _singbox_kill_connections_by_ip(self, source_ip):
+        if not source_ip:
+            return 0
+        snapshot = self._singbox_clash_api_get("/connections")
+        if not snapshot:
+            return 0
+        killed = 0
+        for conn in snapshot.get("connections") or []:
+            meta = conn.get("metadata", {})
+            if meta.get("sourceIP") == source_ip:
+                if self._singbox_clash_api_delete(f"/connections/{conn.get('id')}"):
+                    killed += 1
+        return killed
+
+    def _singbox_guard_ensure_nft_setup(self):
+        try:
+            subprocess.run(["nft", "add", "table", "inet", SINGBOX_GUARD_TABLE], check=False, capture_output=True)
+            subprocess.run(
+                ["nft", "add", "set", "inet", SINGBOX_GUARD_TABLE, "singbox_ports", "{ type inet_service; }"],
+                check=False, capture_output=True
+            )
+            subprocess.run(
+                ["nft", "add", "set", "inet", SINGBOX_GUARD_TABLE, "blocked_ips", "{ type ipv4_addr; flags timeout; }"],
+                check=False, capture_output=True
+            )
+            subprocess.run(
+                ["nft", "add", "chain", "inet", SINGBOX_GUARD_TABLE, "input",
+                 "{ type filter hook input priority -1; policy accept; }"],
+                check=False, capture_output=True
+            )
+            existing = subprocess.run(
+                ["nft", "list", "chain", "inet", SINGBOX_GUARD_TABLE, "input"],
+                check=False, capture_output=True, text=True
+            )
+            if SINGBOX_GUARD_RULE_COMMENT not in (existing.stdout or ""):
+                subprocess.run(
+                    ["nft", "add", "rule", "inet", SINGBOX_GUARD_TABLE, "input",
+                     "ip", "saddr", "@blocked_ips", "tcp", "dport", "@singbox_ports", "drop",
+                     "comment", f'"{SINGBOX_GUARD_RULE_COMMENT}"'],
+                    check=False, capture_output=True
+                )
+        except Exception:
+            pass
+
+    def _singbox_temp_block_ip(self, source_ip, duration_seconds=200):
+        if not source_ip:
+            return False
+        try:
+            self._singbox_guard_ensure_nft_setup()
+
+            config = self._singbox_load_config()
+            ports = sorted({
+                ib.get("listen_port") for ib in (config.get("inbounds") or [])
+                if isinstance(ib.get("listen_port"), int)
+            })
+            if not ports:
+                return False
+
+            subprocess.run(
+                ["nft", "flush", "set", "inet", SINGBOX_GUARD_TABLE, "singbox_ports"],
+                check=False, capture_output=True
+            )
+            port_list = ", ".join(str(p) for p in ports)
+            subprocess.run(
+                ["nft", "add", "element", "inet", SINGBOX_GUARD_TABLE, "singbox_ports", "{ " + port_list + " }"],
+                check=False, capture_output=True
+            )
+
+            result = subprocess.run(
+                ["nft", "add", "element", "inet", SINGBOX_GUARD_TABLE, "blocked_ips",
+                 "{ " + str(source_ip) + f" timeout {int(duration_seconds)}s }}"],
+                check=False, capture_output=True, text=True
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
 
     def _update_iptables_port(self, port):
         p = str(int(port))
@@ -2189,11 +2728,17 @@ class StatusHandler(BaseHTTPRequestHandler):
 
         wg_any_active = bool(wg_unit.get("active")) or any(bool((i.get("service") or {}).get("active")) for i in wg_instances[1:])
 
+        singbox_installed = bool(shutil.which("eylan-singbox")) or os.path.exists("/usr/local/bin/eylan-singbox")
+        singbox_unit = self._systemctl_state(f"{SINGBOX_SERVICE_NAME}.service")
+        if singbox_unit["state"] == "not-found":
+            singbox_unit = self._systemctl_state(SINGBOX_SERVICE_NAME)
+
         return {
             "openvpn": {"installed": openvpn_installed, "active": bool(openvpn_any_active), "instances": openvpn_instances},
             "cisco": {"installed": ocserv_installed, "active": bool(cisco_unit.get("active")), "service": cisco_unit},
             "l2tp": {"installed": bool(l2tp_installed), "active": bool(l2tp_unit.get("active")), "service": l2tp_unit, "services": {"xl2tpd": l2tp_unit}},
             "wireguard": {"installed": wg_installed, "active": wg_any_active, "service": wg_unit, "instances": wg_instances},
+            "singbox": {"installed": singbox_installed, "active": bool(singbox_unit.get("active")), "service": singbox_unit},
         }
 
     def do_GET(self):
@@ -2794,6 +3339,10 @@ class StatusHandler(BaseHTTPRequestHandler):
                                     if pub in current_wg_peers and current_wg_peers[pub] == (allowed_norm or "") and not psk:
                                         needs_update = False
 
+                                    block_until = WG_TEMP_BLOCKED_UNTIL.get(("wg1", pub))
+                                    if block_until and time.time() < block_until:
+                                        needs_update = False
+
                                     if needs_update:
                                         self._wg1_set_peer(pub, allowed_ips=allowed, preshared_key=psk, reset_first=False)
 
@@ -2889,7 +3438,10 @@ class StatusHandler(BaseHTTPRequestHandler):
                                             continue
                                         desired_pubs.add(pub)
 
-                                        if current_peers.get(pub) != allowed_norm:
+                                        block_until = WG_TEMP_BLOCKED_UNTIL.get((instance_name, pub))
+                                        actively_blocked = bool(block_until and time.time() < block_until)
+
+                                        if current_peers.get(pub) != allowed_norm and not actively_blocked:
                                             subprocess.run(
                                                 ["wg", "set", instance_name, "peer", pub, "allowed-ips", allowed_norm],
                                                 check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10
@@ -3044,7 +3596,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                     elif cmd == "kill" or cmd == "kill_id":
                         uname = str(item.get("username") or "").strip()
                         sid = item.get("session_id")
-                        proto = str(item.get("protocol") or "")
+                        proto = str(item.get("protocol") or "").upper()
                         mgmt_port = item.get("mgmt_port")
 
                         success = False
@@ -3052,7 +3604,7 @@ class StatusHandler(BaseHTTPRequestHandler):
 
                         if sid:
                             try:
-                                if "Cisco" in proto:
+                                if "CISCO" in proto:
                                     subprocess.run([OCCTL_BIN, "disconnect", "id", str(sid)], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
                                     success = True
                                     msg = "Killed Cisco ID"
@@ -3060,7 +3612,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                                     os.kill(int(sid), 9)
                                     success = True
                                     msg = "Killed L2TP PID"
-                                elif "OpenVPN" in proto:
+                                elif "OPENVPN" in proto or "OVPN" in proto:
                                     ports = [mgmt_port] if mgmt_port else self._get_all_management_ports()
                                     for p in ports:
                                         try:
@@ -3073,15 +3625,32 @@ class StatusHandler(BaseHTTPRequestHandler):
                                             pass
                                     success = True
                                     msg = "Killed OVPN CID"
-                                elif "WireGuard" in proto or "WG" in proto:
-                                    inst_match = re.search(r'\(([^)]+)\)', proto)
-                                    inst_name = inst_match.group(1).strip() if inst_match else None
-                                    if inst_name and inst_name != "wg1" and _is_valid_wg_instance_name(inst_name):
-                                        self._wg_instance_kick_peer(inst_name, str(sid))
+                                elif "WIREGUARD" in proto or proto == "WG":
+                                    inst_name = str(item.get("instance") or "").strip() or None
+                                    effective_inst = inst_name if (inst_name and inst_name != "wg1" and _is_valid_wg_instance_name(inst_name)) else "wg1"
+                                    if _wg_should_block_after_kill(uname, effective_inst, str(sid)):
+                                        if effective_inst != "wg1":
+                                            self._wg_instance_temp_kick_peer(effective_inst, str(sid), duration_seconds=200)
+                                        else:
+                                            self._wg1_temp_kick_peer(str(sid), duration_seconds=200)
+                                        msg = "Kicked WG Peer (blocked 200s)"
                                     else:
-                                        self._wg1_kick_peer(str(sid))
+                                        if effective_inst != "wg1":
+                                            self._wg_instance_kick_peer(effective_inst, str(sid))
+                                        else:
+                                            self._wg1_kick_peer(str(sid))
+                                        msg = "Kicked WG Peer"
                                     success = True
-                                    msg = "Kicked WG Peer"
+                                elif "SINGBOX" in proto:
+                                    killed_n = self._singbox_kill_connections_by_ip(str(sid))
+                                    success = killed_n > 0
+                                    if success:
+                                        blocked = False
+                                        if _singbox_should_block_after_kill(uname, str(sid)):
+                                            blocked = self._singbox_temp_block_ip(str(sid), duration_seconds=200)
+                                        msg = f"Killed sing-box connection(s), blocked={blocked}"
+                                    else:
+                                        msg = "sing-box kill failed"
                             except Exception as e:
                                 success = False
                                 msg = str(e)
@@ -3404,6 +3973,22 @@ class StatusHandler(BaseHTTPRequestHandler):
                         else:
                             success, msg = False, "Missing port"
 
+                    elif cmd == "singbox_user_action":
+                        success, msg = self._handle_singbox_single(item)
+
+                    elif cmd == "singbox_inbound_provision":
+                        success, msg = self._handle_singbox_inbound_provision(item)
+
+                    elif cmd == "singbox_inbound_remove":
+                        success, msg = self._handle_singbox_inbound_remove(item)
+
+                    elif cmd == "singbox_sync_inbound_users":
+                        success, msg = self._handle_singbox_sync_inbound_users(item)
+
+                    elif cmd == "singbox_kill_user":
+                        killed_count = self._singbox_kill_connections_for_user(uname)
+                        success, msg = True, f"Killed {killed_count} sing-box connection(s) for {uname}"
+
                     result_obj = {"username": uname, "success": success, "message": msg}
                     if isinstance(res_extra, dict) and res_extra:
                         result_obj.update(res_extra)
@@ -3451,11 +4036,15 @@ def background_monitor_engine():
             def get_wireguard_multi():
                 return dummy_handler._get_all_wg_statuses(local_detailed)
 
+            def get_singbox():
+                return dummy_handler._extract_singbox_sessions(local_detailed)
+
             f_ovpn = executor.submit(get_openvpn)
             f_l2tp = executor.submit(get_l2tp)
             f_cisco = executor.submit(get_cisco)
             f_wg = executor.submit(get_wireguard)
             f_wg_multi = executor.submit(get_wireguard_multi)
+            f_singbox = executor.submit(get_singbox)
 
             try:
                 sessions.extend(f_ovpn.result(timeout=10) or [])
@@ -3463,6 +4052,7 @@ def background_monitor_engine():
                 sessions.extend(f_cisco.result(timeout=10) or [])
                 sessions.extend(f_wg.result(timeout=10) or [])
                 sessions.extend(f_wg_multi.result(timeout=10) or [])
+                sessions.extend(f_singbox.result(timeout=10) or [])
             except:
                 pass
 
