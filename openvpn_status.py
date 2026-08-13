@@ -101,12 +101,9 @@ SINGBOX_LOG_CONTEXT_CACHE = {}
 SINGBOX_LOG_LOCK = threading.Lock()
 SINGBOX_LOG_LAST_OFFSET = 0
 
-SINGBOX_LOG_FROM_RE = re.compile(
-    r'\[(\d+)\s+\d+ms\]\s+inbound/\w+\[([^\]]+)\]:\s+inbound (?:connection|packet connection) from\s+([0-9a-fA-F:.]+):(\d+)'
-)
-SINGBOX_LOG_USER_RE = re.compile(
-    r'\[(\d+)\s+\d+ms\]\s+inbound/\w+\[([^\]]+)\]:\s+\[([^\]]*)\]\s+inbound (?:connection|packet)'
-)
+SINGBOX_LOG_FROM_RE = re.compile(r'\[(\d+)\s+\d+ms\]\s+inbound/\w+\[([^\]]+)\]:\s+inbound connection from\s+([0-9a-fA-F:.]+):(\d+)')
+SINGBOX_LOG_USER_RE = re.compile(r'\[(\d+)\s+\d+ms\]\s+inbound/\w+\[([^\]]+)\]:\s+\[([^\]]*)\]\s+inbound connection')
+
 
 SINGBOX_CONN_START_RE = re.compile(r'^(.*T\d{2}:\d{2}:\d{2})\.(\d+)(.*)$')
 
@@ -127,6 +124,34 @@ def _singbox_parse_conn_start(start_val):
         except Exception:
             pass
     return time.time()
+
+
+def _singbox_load_config():
+    try:
+        with open(SINGBOX_CONFIG_PATH, 'r') as f:
+            return json.load(f)
+    except Exception:
+        return {"log": {"level": "info"}, "inbounds": [], "outbounds": [{"type": "direct", "tag": "direct"}]}
+
+
+def _singbox_clash_api_get(path):
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        req = urllib.request.Request(f"{SINGBOX_CLASH_API}{path}")
+        with opener.open(req, timeout=5) as resp:
+            return json.loads(resp.read().decode())
+    except Exception:
+        return None
+
+
+def _singbox_clash_api_delete(path):
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        req = urllib.request.Request(f"{SINGBOX_CLASH_API}{path}", method="DELETE")
+        with opener.open(req, timeout=5):
+            return True
+    except Exception:
+        return False
 
 
 GLOBAL_DATA_STORE = {
@@ -2128,205 +2153,67 @@ class StatusHandler(BaseHTTPRequestHandler):
         except Exception:
             return False
 
-    def _handle_singbox_single(self, cmd):
-        uname = (cmd.get("username") or "").strip()
-        inbound_tag = (cmd.get("inbound_tag") or "").strip()
-        credential = cmd.get("credential")
-        flow = cmd.get("flow")
-        action = (cmd.get("action") or "add").strip().lower()
-
-        if not uname or not inbound_tag:
-            return False, "Missing username or inbound_tag"
-
-        try:
-            with SINGBOX_LOCAL_LOCK:
-                config = self._singbox_load_config()
-                target = None
-                for inb in config.get("inbounds", []):
-                    if inb.get("tag") == inbound_tag:
-                        target = inb
-                        break
-
-                if target is None:
-                    return True, f"Inbound '{inbound_tag}' not hosted on this server, skipped"
-
-                users_list = target.setdefault("users", [])
-                users_list[:] = [u for u in users_list if u.get("name") != uname]
-
-                if action in ("add", "update"):
-                    if not credential:
-                        return False, "Missing credential for add/update"
-                    entry = {"name": uname}
-                    if target.get("type") in ("vless", "vmess"):
-                        entry["uuid"] = credential
-                        if target.get("type") == "vless" and flow:
-                            entry["flow"] = flow
-                    else:
-                        entry["password"] = credential
-                    users_list.append(entry)
-                elif action != "delete":
-                    return False, f"Unknown action: {action}"
-
-                self._singbox_save_config(config)
-
-            self._singbox_reload()
-            return True, f"sing-box user {uname} {action} on {inbound_tag} done"
-        except Exception as e:
-            return False, f"sing-box Error: {str(e)}"
-
-    def _handle_singbox_inbound_provision(self, cmd):
-        inbound_def = cmd.get("inbound_definition")
-        if not inbound_def or not inbound_def.get("tag"):
-            return False, "Missing inbound_definition/tag"
-        try:
-            with SINGBOX_LOCAL_LOCK:
-                config = self._singbox_load_config()
-                inbounds = config.get("inbounds", [])
-                inbounds[:] = [i for i in inbounds if i.get("tag") != inbound_def["tag"]]
-                inbound_def.setdefault("users", [])
-                inbounds.append(inbound_def)
-                config["inbounds"] = inbounds
-                self._singbox_save_config(config)
-            self._singbox_reload()
-            return True, f"Inbound {inbound_def['tag']} provisioned"
-        except Exception as e:
-            return False, f"sing-box provision error: {str(e)}"
-
-    def _handle_singbox_inbound_remove(self, cmd):
-        tag = (cmd.get("inbound_tag") or "").strip()
-        if not tag:
-            return False, "Missing inbound_tag"
-        try:
-            with SINGBOX_LOCAL_LOCK:
-                config = self._singbox_load_config()
-                inbounds = config.get("inbounds", [])
-                before = len(inbounds)
-                inbounds[:] = [i for i in inbounds if i.get("tag") != tag]
-                config["inbounds"] = inbounds
-                self._singbox_save_config(config)
-            self._singbox_reload()
-            removed = before != len(inbounds)
-            return True, f"Inbound {tag} removed" if removed else f"Inbound {tag} was not present"
-        except Exception as e:
-            return False, f"sing-box remove error: {str(e)}"
-
-    def _handle_singbox_sync_inbound_users(self, cmd):
-        tag = (cmd.get("inbound_tag") or "").strip()
-        users = cmd.get("users")
-        if not tag or users is None:
-            return False, "Missing inbound_tag or users"
-        try:
-            with SINGBOX_LOCAL_LOCK:
-                config = self._singbox_load_config()
-                target = None
-                for inb in config.get("inbounds", []):
-                    if inb.get("tag") == tag:
-                        target = inb
-                        break
-                if target is None:
-                    return True, f"Inbound '{tag}' not hosted on this server, skipped"
-                target["users"] = users
-                self._singbox_save_config(config)
-            self._singbox_reload()
-            return True, f"Synced {len(users)} user(s) on {tag}"
-        except Exception as e:
-            return False, f"sing-box sync error: {str(e)}"
-
-    def _singbox_clash_api_get(self, path):
-        try:
-            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-            req = urllib.request.Request(f"{SINGBOX_CLASH_API}{path}")
-            with opener.open(req, timeout=5) as resp:
-                return json.loads(resp.read().decode())
-        except Exception:
-            return None
-
-    def _singbox_clash_api_delete(self, path):
-        try:
-            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-            req = urllib.request.Request(f"{SINGBOX_CLASH_API}{path}", method="DELETE")
-            with opener.open(req, timeout=5):
-                return True
-        except Exception:
-            return False
-
-    def _singbox_tail_log_and_update_cache(self):
-        global SINGBOX_LOG_LAST_OFFSET
-        if not os.path.exists(SINGBOX_LOG_PATH):
-            return
-
-        try:
-            with SINGBOX_LOG_LOCK:
-                file_size = os.path.getsize(SINGBOX_LOG_PATH)
-                if file_size < SINGBOX_LOG_LAST_OFFSET:
-                    SINGBOX_LOG_LAST_OFFSET = 0
-
-                with open(SINGBOX_LOG_PATH, 'r', errors='ignore') as f:
-                    f.seek(SINGBOX_LOG_LAST_OFFSET)
-                    new_lines = f.readlines()
-                    SINGBOX_LOG_LAST_OFFSET = f.tell()
-
-                now = time.time()
-                for line in new_lines:
-                    m_from = SINGBOX_LOG_FROM_RE.search(line)
-                    if m_from:
-                        ctx_id, tag, ip, port = m_from.groups()
-                        entry = SINGBOX_LOG_CONTEXT_CACHE.setdefault(ctx_id, {})
-                        entry["source_ip"] = ip
-                        entry["source_port"] = port
-                        entry["inbound_tag"] = tag
-                        entry["seen_at"] = now
-                        continue
-                    m_user = SINGBOX_LOG_USER_RE.search(line)
-                    if m_user:
-                        ctx_id, tag, uname = m_user.groups()
-                        entry = SINGBOX_LOG_CONTEXT_CACHE.setdefault(ctx_id, {})
-                        entry["username"] = uname
-                        entry["inbound_tag"] = tag
-                        entry["seen_at"] = now
-
-                stale = [k for k, v in SINGBOX_LOG_CONTEXT_CACHE.items() if now - v.get("seen_at", 0) > 600]
-                for k in stale:
-                    del SINGBOX_LOG_CONTEXT_CACHE[k]
-        except Exception:
-            pass
-
-    def _extract_singbox_sessions(self, detailed_users):
+    def _singbox_extract_sessions(self, detailed_users):
         sessions = []
-        self._singbox_tail_log_and_update_cache()
 
-        snapshot = self._singbox_clash_api_get("/connections")
-        if not snapshot or "connections" not in snapshot:
+        if not os.path.exists(SINGBOX_LOG_PATH):
             return sessions
 
-        ip_to_user = {}
-        ip_port_to_tag = {}
-        for entry in SINGBOX_LOG_CONTEXT_CACHE.values():
-            ip = entry.get("source_ip")
-            port = entry.get("source_port")
-            uname = entry.get("username")
-            if ip and uname:
-                ip_to_user[ip] = uname
-            if ip and port and entry.get("inbound_tag"):
-                ip_port_to_tag[(ip, str(port))] = entry["inbound_tag"]
+        try:
+            with open(SINGBOX_LOG_PATH, 'r', errors='ignore') as f:
+                lines = f.readlines()
 
-        agg = {}
-        for conn in snapshot.get("connections") or []:
-            try:
+            ctx_map = {}
+            for line in lines:
+                m_from = SINGBOX_LOG_FROM_RE.search(line)
+                if m_from:
+                    ctx_id, tag, ip, port = m_from.groups()
+                    entry = ctx_map.setdefault(ctx_id, {})
+                    entry["source_ip"] = ip
+                    entry["source_port"] = port
+                    entry["tag"] = tag
+                    continue
+                m_user = SINGBOX_LOG_USER_RE.search(line)
+                if m_user:
+                    ctx_id, tag, uname = m_user.groups()
+                    entry = ctx_map.setdefault(ctx_id, {})
+                    entry["username"] = uname
+                    entry["tag"] = tag
+
+            ip_to_user = {}
+            for entry in ctx_map.values():
+                ip = entry.get("source_ip")
+                port = entry.get("source_port")
+                uname = entry.get("username")
+                if ip and port and uname:
+                    ip_to_user[(ip, str(port))] = uname
+
+            if not ip_to_user:
+                return sessions
+
+            snapshot = self._singbox_clash_api_get("/connections")
+            if not snapshot or "connections" not in snapshot:
+                return sessions
+
+            aggregated = {}
+
+            for conn in snapshot.get("connections") or []:
                 meta = conn.get("metadata", {})
                 source_ip = meta.get("sourceIP")
                 source_port = meta.get("sourcePort")
-                username = ip_to_user.get(source_ip)
-                if not username or not source_ip:
+
+                username = ip_to_user.get((source_ip, str(source_port)))
+                if not username or not source_ip or not source_port:
                     continue
 
-                download = conn.get("download", 0) or 0
-                upload = conn.get("upload", 0) or 0
+                download = int(conn.get("download") or 0)
+                upload = int(conn.get("upload") or 0)
+                connected_at = _singbox_parse_conn_start(conn.get("start"))
+
                 key = (username, source_ip)
-                conn_start = _singbox_parse_conn_start(conn.get("start"))
-                inbound_tag = ip_port_to_tag.get((source_ip, str(source_port))) if source_port else None
-                if key not in agg:
-                    agg[key] = {
+
+                if key not in aggregated:
+                    aggregated[key] = {
                         "username": username,
                         "protocol": "SINGBOX",
                         "ip": source_ip,
@@ -2334,147 +2221,88 @@ class StatusHandler(BaseHTTPRequestHandler):
                         "interface": meta.get("type", "singbox"),
                         "bytes_received": 0,
                         "bytes_sent": 0,
-                        "connected_at": conn_start,
+                        "connected_at": connected_at,
                         "session_id": source_ip,
                         "source": "node",
-                        "inbound_tag": inbound_tag
+                        "inbound_tag": meta.get("type", "").split("/")[1] if "/" in meta.get("type", "") else meta.get("type", ""),
+                        "is_active": True
                     }
-                elif conn_start < agg[key]["connected_at"]:
-                    agg[key]["connected_at"] = conn_start
-                if not agg[key].get("inbound_tag") and inbound_tag:
-                    agg[key]["inbound_tag"] = inbound_tag
-                agg[key]["bytes_received"] += upload
-                agg[key]["bytes_sent"] += download
+                else:
+                    aggregated[key]["bytes_received"] += upload
+                    aggregated[key]["bytes_sent"] += download
+                    if connected_at < aggregated[key]["connected_at"]:
+                        aggregated[key]["connected_at"] = connected_at
 
-                legacy_key = f"sing-box:{inbound_tag}" if inbound_tag else "sing-box"
+                legacy_key = "sing-box"
                 with DETAILED_LOCK:
                     if username not in detailed_users:
                         detailed_users[username] = {}
                     if legacy_key not in detailed_users[username]:
                         detailed_users[username][legacy_key] = {"active": 0, "bytes_received": 0, "bytes_sent": 0}
+                    detailed_users[username][legacy_key]["active"] += 1
                     detailed_users[username][legacy_key]["bytes_received"] += upload
                     detailed_users[username][legacy_key]["bytes_sent"] += download
-            except Exception:
-                continue
 
-        now_epoch = time.time()
-        with SINGBOX_CONN_FIRST_SEEN_LOCK:
-            for key, sess in agg.items():
-                cached = SINGBOX_CONN_FIRST_SEEN.get(key)
-                if cached is None:
-                    SINGBOX_CONN_FIRST_SEEN[key] = {"first_seen": sess["connected_at"], "last_seen": now_epoch}
-                else:
-                    sess["connected_at"] = cached["first_seen"]
-                    cached["last_seen"] = now_epoch
-            for stale_key, entry in list(SINGBOX_CONN_FIRST_SEEN.items()):
-                if now_epoch - entry.get("last_seen", 0) > 90:
-                    SINGBOX_CONN_FIRST_SEEN.pop(stale_key, None)
+            sessions = list(aggregated.values())
 
-        for key, sess in agg.items():
-            username = key[0]
-            legacy_key = f"sing-box:{sess.get('inbound_tag')}" if sess.get("inbound_tag") else "sing-box"
-            with DETAILED_LOCK:
-                if username in detailed_users and legacy_key in detailed_users[username]:
-                    detailed_users[username][legacy_key]["active"] += 1
-            sessions.append(sess)
-
-        return sessions
-
-    def _singbox_kill_connections_for_user(self, username):
-        snapshot = self._singbox_clash_api_get("/connections")
-        if not snapshot:
-            return 0
-        ip_to_user = {}
-        for entry in SINGBOX_LOG_CONTEXT_CACHE.values():
-            ip = entry.get("source_ip")
-            uname = entry.get("username")
-            if ip and uname:
-                ip_to_user[ip] = uname
-
-        killed = 0
-        for conn in snapshot.get("connections") or []:
-            meta = conn.get("metadata", {})
-            if ip_to_user.get(meta.get("sourceIP")) == username:
-                if self._singbox_clash_api_delete(f"/connections/{conn.get('id')}"):
-                    killed += 1
-        return killed
-
-    def _singbox_kill_connections_by_ip(self, source_ip):
-        if not source_ip:
-            return 0
-        snapshot = self._singbox_clash_api_get("/connections")
-        if not snapshot:
-            return 0
-        killed = 0
-        for conn in snapshot.get("connections") or []:
-            meta = conn.get("metadata", {})
-            if meta.get("sourceIP") == source_ip:
-                if self._singbox_clash_api_delete(f"/connections/{conn.get('id')}"):
-                    killed += 1
-        return killed
-
-    def _singbox_guard_ensure_nft_setup(self):
-        try:
-            subprocess.run(["nft", "add", "table", "inet", SINGBOX_GUARD_TABLE], check=False, capture_output=True)
-            subprocess.run(
-                ["nft", "add", "set", "inet", SINGBOX_GUARD_TABLE, "singbox_ports", "{ type inet_service; }"],
-                check=False, capture_output=True
-            )
-            subprocess.run(
-                ["nft", "add", "set", "inet", SINGBOX_GUARD_TABLE, "blocked_ips", "{ type ipv4_addr; flags timeout; }"],
-                check=False, capture_output=True
-            )
-            subprocess.run(
-                ["nft", "add", "chain", "inet", SINGBOX_GUARD_TABLE, "input",
-                 "{ type filter hook input priority -1; policy accept; }"],
-                check=False, capture_output=True
-            )
-            existing = subprocess.run(
-                ["nft", "list", "chain", "inet", SINGBOX_GUARD_TABLE, "input"],
-                check=False, capture_output=True, text=True
-            )
-            if SINGBOX_GUARD_RULE_COMMENT not in (existing.stdout or ""):
-                subprocess.run(
-                    ["nft", "add", "rule", "inet", SINGBOX_GUARD_TABLE, "input",
-                     "ip", "saddr", "@blocked_ips", "tcp", "dport", "@singbox_ports", "drop",
-                     "comment", f'"{SINGBOX_GUARD_RULE_COMMENT}"'],
-                    check=False, capture_output=True
-                )
         except Exception:
             pass
 
-    def _singbox_temp_block_ip(self, source_ip, duration_seconds=200):
-        if not source_ip:
-            return False
+        return sessions
+
+    def _singbox_kill_user(self, username, target_ip=None):
+        snapshot = self._singbox_clash_api_get("/connections")
+        if not snapshot:
+            return 0
+
+        if not os.path.exists(SINGBOX_LOG_PATH):
+            return 0
+
         try:
-            self._singbox_guard_ensure_nft_setup()
+            with open(SINGBOX_LOG_PATH, 'r', errors='ignore') as f:
+                lines = f.readlines()
 
-            config = self._singbox_load_config()
-            ports = sorted({
-                ib.get("listen_port") for ib in (config.get("inbounds") or [])
-                if isinstance(ib.get("listen_port"), int)
-            })
-            if not ports:
-                return False
+            ctx_map = {}
+            for line in lines:
+                m_from = SINGBOX_LOG_FROM_RE.search(line)
+                if m_from:
+                    ctx_id, tag, ip, port = m_from.groups()
+                    entry = ctx_map.setdefault(ctx_id, {})
+                    entry["source_ip"] = ip
+                    entry["source_port"] = port
+                    entry["tag"] = tag
+                    continue
+                m_user = SINGBOX_LOG_USER_RE.search(line)
+                if m_user:
+                    ctx_id, tag, uname = m_user.groups()
+                    entry = ctx_map.setdefault(ctx_id, {})
+                    entry["username"] = uname
+                    entry["tag"] = tag
 
-            subprocess.run(
-                ["nft", "flush", "set", "inet", SINGBOX_GUARD_TABLE, "singbox_ports"],
-                check=False, capture_output=True
-            )
-            port_list = ", ".join(str(p) for p in ports)
-            subprocess.run(
-                ["nft", "add", "element", "inet", SINGBOX_GUARD_TABLE, "singbox_ports", "{ " + port_list + " }"],
-                check=False, capture_output=True
-            )
+            ip_to_user = {}
+            for entry in ctx_map.values():
+                ip = entry.get("source_ip")
+                port = entry.get("source_port")
+                uname = entry.get("username")
+                if ip and port and uname:
+                    ip_to_user[(ip, str(port))] = uname
 
-            result = subprocess.run(
-                ["nft", "add", "element", "inet", SINGBOX_GUARD_TABLE, "blocked_ips",
-                 "{ " + str(source_ip) + f" timeout {int(duration_seconds)}s }}"],
-                check=False, capture_output=True, text=True
-            )
-            return result.returncode == 0
+            killed = 0
+            for conn in snapshot.get("connections") or []:
+                meta = conn.get("metadata", {})
+                source_ip = meta.get("sourceIP")
+                source_port = meta.get("sourcePort")
+                conn_username = ip_to_user.get((source_ip, str(source_port)))
+
+                if conn_username == username:
+                    if target_ip and source_ip != target_ip:
+                        continue
+                    if self._singbox_clash_api_delete(f"/connections/{conn.get('id')}"):
+                        killed += 1
+
+            return killed
         except Exception:
-            return False
+            return 0
 
     def _update_iptables_port(self, port):
         p = str(int(port))
@@ -3647,13 +3475,10 @@ class StatusHandler(BaseHTTPRequestHandler):
                                         msg = "Kicked WG Peer"
                                     success = True
                                 elif "SINGBOX" in proto:
-                                    killed_n = self._singbox_kill_connections_by_ip(str(sid))
+                                    killed_n = self._singbox_kill_user(uname, sid)
                                     success = killed_n > 0
                                     if success:
-                                        blocked = False
-                                        if _singbox_should_block_after_kill(uname, str(sid)):
-                                            blocked = self._singbox_temp_block_ip(str(sid), duration_seconds=200)
-                                        msg = f"Killed sing-box connection(s), blocked={blocked}"
+                                        msg = f"Killed {killed_n} sing-box connection(s)"
                                     else:
                                         msg = "sing-box kill failed"
                             except Exception as e:
@@ -3991,7 +3816,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                         success, msg = self._handle_singbox_sync_inbound_users(item)
 
                     elif cmd == "singbox_kill_user":
-                        killed_count = self._singbox_kill_connections_for_user(uname)
+                        killed_count = self._singbox_kill_user(uname)
                         success, msg = True, f"Killed {killed_count} sing-box connection(s) for {uname}"
 
                     result_obj = {"username": uname, "success": success, "message": msg}
@@ -4042,7 +3867,7 @@ def background_monitor_engine():
                 return dummy_handler._get_all_wg_statuses(local_detailed)
 
             def get_singbox():
-                return dummy_handler._extract_singbox_sessions(local_detailed)
+                return dummy_handler._singbox_extract_sessions(local_detailed)
 
             f_ovpn = executor.submit(get_openvpn)
             f_l2tp = executor.submit(get_l2tp)
