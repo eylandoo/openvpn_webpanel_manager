@@ -97,12 +97,78 @@ def _singbox_should_block_after_kill(username, source_ip):
         SINGBOX_KILL_STRIKES[key] = now
         return last is not None and (now - last) < SINGBOX_STRIKE_WINDOW_SECONDS
 
+
+def _singbox_guard_ensure_nft_setup():
+    try:
+        subprocess.run(["nft", "add", "table", "inet", SINGBOX_GUARD_TABLE], check=False, capture_output=True)
+        subprocess.run(
+            ["nft", "add", "set", "inet", SINGBOX_GUARD_TABLE, "singbox_ports", "{ type inet_service; }"],
+            check=False, capture_output=True
+        )
+        subprocess.run(
+            ["nft", "add", "set", "inet", SINGBOX_GUARD_TABLE, "blocked_ips", "{ type ipv4_addr; flags timeout; }"],
+            check=False, capture_output=True
+        )
+        subprocess.run(
+            ["nft", "add", "chain", "inet", SINGBOX_GUARD_TABLE, "input",
+             "{ type filter hook input priority -1; policy accept; }"],
+            check=False, capture_output=True
+        )
+        existing = subprocess.run(
+            ["nft", "list", "chain", "inet", SINGBOX_GUARD_TABLE, "input"],
+            check=False, capture_output=True, text=True
+        )
+        if SINGBOX_GUARD_RULE_COMMENT not in (existing.stdout or ""):
+            subprocess.run(
+                ["nft", "add", "rule", "inet", SINGBOX_GUARD_TABLE, "input",
+                 "ip", "saddr", "@blocked_ips", "tcp", "dport", "@singbox_ports", "drop",
+                 "comment", f'"{SINGBOX_GUARD_RULE_COMMENT}"'],
+                check=False, capture_output=True
+            )
+    except Exception:
+        pass
+
+
+def _singbox_temp_block_ip(source_ip, duration_seconds=200):
+    if not source_ip:
+        return False
+    try:
+        _singbox_guard_ensure_nft_setup()
+
+        config = _singbox_load_config()
+        ports = sorted({
+            ib.get("listen_port") for ib in (config.get("inbounds") or [])
+            if isinstance(ib.get("listen_port"), int)
+        })
+        if not ports:
+            return False
+
+        subprocess.run(
+            ["nft", "flush", "set", "inet", SINGBOX_GUARD_TABLE, "singbox_ports"],
+            check=False, capture_output=True
+        )
+        port_list = ", ".join(str(p) for p in ports)
+        subprocess.run(
+            ["nft", "add", "element", "inet", SINGBOX_GUARD_TABLE, "singbox_ports", "{ " + port_list + " }"],
+            check=False, capture_output=True
+        )
+
+        result = subprocess.run(
+            ["nft", "add", "element", "inet", SINGBOX_GUARD_TABLE, "blocked_ips",
+             "{ " + str(source_ip) + f" timeout {int(duration_seconds)}s }}"],
+            check=False, capture_output=True, text=True
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
 SINGBOX_LOG_CONTEXT_CACHE = {}
 SINGBOX_LOG_LOCK = threading.Lock()
 SINGBOX_LOG_LAST_OFFSET = 0
 
-SINGBOX_LOG_FROM_RE = re.compile(r'\[(\d+)\s+\d+ms\]\s+inbound/\w+\[([^\]]+)\]:\s+inbound connection from\s+([0-9a-fA-F:.]+):(\d+)')
-SINGBOX_LOG_USER_RE = re.compile(r'\[(\d+)\s+\d+ms\]\s+inbound/\w+\[([^\]]+)\]:\s+\[([^\]]*)\]\s+inbound connection')
+SINGBOX_LOG_FROM_RE = re.compile(r'\[(\d+)\s+\d+ms\]\s+inbound/\w+\[([^\]]+)\]:\s+inbound(?:\s+packet)?\s+connection from\s+([0-9a-fA-F:.]+):(\d+)')
+SINGBOX_LOG_USER_RE = re.compile(r'\[(\d+)\s+\d+ms\]\s+inbound/\w+\[([^\]]+)\]:\s+\[([^\]]*)\]\s+inbound(?:\s+packet)?\s+connection')
 
 
 SINGBOX_CONN_START_RE = re.compile(r'^(.*T\d{2}:\d{2}:\d{2})\.(\d+)(.*)$')
@@ -2181,17 +2247,20 @@ class StatusHandler(BaseHTTPRequestHandler):
                     entry["tag"] = tag
 
             ip_to_user = {}
+            ip_port_to_tag = {}
             for entry in ctx_map.values():
                 ip = entry.get("source_ip")
                 port = entry.get("source_port")
                 uname = entry.get("username")
                 if ip and port and uname:
                     ip_to_user[(ip, str(port))] = uname
+                if ip and port and entry.get("tag"):
+                    ip_port_to_tag[(ip, str(port))] = entry["tag"]
 
             if not ip_to_user:
                 return sessions
 
-            snapshot = self._singbox_clash_api_get("/connections")
+            snapshot = _singbox_clash_api_get("/connections")
             if not snapshot or "connections" not in snapshot:
                 return sessions
 
@@ -2209,22 +2278,24 @@ class StatusHandler(BaseHTTPRequestHandler):
                 download = int(conn.get("download") or 0)
                 upload = int(conn.get("upload") or 0)
                 connected_at = _singbox_parse_conn_start(conn.get("start"))
+                conn_tag = ip_port_to_tag.get((source_ip, str(source_port)))
 
                 key = (username, source_ip)
+                is_new_session = key not in aggregated
 
-                if key not in aggregated:
+                if is_new_session:
                     aggregated[key] = {
                         "username": username,
                         "protocol": "SINGBOX",
                         "ip": source_ip,
                         "v_ip": "",
-                        "interface": meta.get("type", "singbox"),
+                        "interface": "singbox",
                         "bytes_received": 0,
                         "bytes_sent": 0,
                         "connected_at": connected_at,
                         "session_id": source_ip,
                         "source": "node",
-                        "inbound_tag": meta.get("type", "").split("/")[1] if "/" in meta.get("type", "") else meta.get("type", ""),
+                        "inbound_tag": conn_tag,
                         "is_active": True
                     }
                 else:
@@ -2233,15 +2304,29 @@ class StatusHandler(BaseHTTPRequestHandler):
                     if connected_at < aggregated[key]["connected_at"]:
                         aggregated[key]["connected_at"] = connected_at
 
-                legacy_key = "sing-box"
+                legacy_key = f"sing-box:{conn_tag}" if conn_tag else "sing-box"
                 with DETAILED_LOCK:
                     if username not in detailed_users:
                         detailed_users[username] = {}
                     if legacy_key not in detailed_users[username]:
                         detailed_users[username][legacy_key] = {"active": 0, "bytes_received": 0, "bytes_sent": 0}
-                    detailed_users[username][legacy_key]["active"] += 1
+                    if is_new_session:
+                        detailed_users[username][legacy_key]["active"] += 1
                     detailed_users[username][legacy_key]["bytes_received"] += upload
                     detailed_users[username][legacy_key]["bytes_sent"] += download
+
+            now_epoch = time.time()
+            with SINGBOX_CONN_FIRST_SEEN_LOCK:
+                for key, sess in aggregated.items():
+                    cached = SINGBOX_CONN_FIRST_SEEN.get(key)
+                    if cached is None:
+                        SINGBOX_CONN_FIRST_SEEN[key] = {"first_seen": sess["connected_at"], "last_seen": now_epoch}
+                    else:
+                        sess["connected_at"] = cached["first_seen"]
+                        cached["last_seen"] = now_epoch
+                for stale_key, entry in list(SINGBOX_CONN_FIRST_SEEN.items()):
+                    if now_epoch - entry.get("last_seen", 0) > 90:
+                        SINGBOX_CONN_FIRST_SEEN.pop(stale_key, None)
 
             sessions = list(aggregated.values())
 
@@ -2251,7 +2336,7 @@ class StatusHandler(BaseHTTPRequestHandler):
         return sessions
 
     def _singbox_kill_user(self, username, target_ip=None):
-        snapshot = self._singbox_clash_api_get("/connections")
+        snapshot = _singbox_clash_api_get("/connections")
         if not snapshot:
             return 0
 
@@ -2297,7 +2382,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                 if conn_username == username:
                     if target_ip and source_ip != target_ip:
                         continue
-                    if self._singbox_clash_api_delete(f"/connections/{conn.get('id')}"):
+                    if _singbox_clash_api_delete(f"/connections/{conn.get('id')}"):
                         killed += 1
 
             return killed
@@ -3478,7 +3563,10 @@ class StatusHandler(BaseHTTPRequestHandler):
                                     killed_n = self._singbox_kill_user(uname, sid)
                                     success = killed_n > 0
                                     if success:
-                                        msg = f"Killed {killed_n} sing-box connection(s)"
+                                        blocked = False
+                                        if _singbox_should_block_after_kill(uname, sid):
+                                            blocked = _singbox_temp_block_ip(sid, duration_seconds=200)
+                                        msg = f"Killed {killed_n} sing-box connection(s), blocked={blocked}"
                                     else:
                                         msg = "sing-box kill failed"
                             except Exception as e:
