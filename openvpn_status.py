@@ -2219,6 +2219,104 @@ class StatusHandler(BaseHTTPRequestHandler):
         except Exception:
             return False
 
+    def _handle_singbox_single(self, item):
+        uname = str(item.get("username") or "").strip()
+        inbound_tag = item.get("inbound_tag")
+        credential = item.get("credential")
+        action = item.get("action")
+        flow = item.get("flow")
+
+        if not uname or not inbound_tag:
+            return False, "Missing username or inbound_tag"
+
+        with SINGBOX_LOCAL_LOCK:
+            config = self._singbox_load_config()
+            inbounds = config.get("inbounds", [])
+
+            target = None
+            for inb in inbounds:
+                if inb.get("tag") == inbound_tag:
+                    target = inb
+                    break
+            if target is None:
+                return False, f"Inbound {inbound_tag} not found on this node"
+
+            users_list = target.setdefault("users", [])
+            users_list[:] = [u for u in users_list if u.get("name") != uname]
+
+            if action in ("add", "update"):
+                if not credential:
+                    return False, f"Empty credential for {uname}/{inbound_tag}"
+                entry = {"name": uname}
+                if target.get("type") in ("vless", "vmess"):
+                    entry["uuid"] = credential
+                    if target.get("type") == "vless" and flow:
+                        entry["flow"] = flow
+                else:
+                    entry["password"] = credential
+                users_list.append(entry)
+            elif action != "delete":
+                return False, f"Unknown action: {action}"
+
+            config["inbounds"] = inbounds
+            self._singbox_save_config(config)
+
+        self._singbox_reload()
+        return True, f"sing-box user {uname} {action} on {inbound_tag}"
+
+    def _handle_singbox_inbound_provision(self, item):
+        inbound_definition = item.get("inbound_definition")
+        tag = inbound_definition.get("tag") if isinstance(inbound_definition, dict) else None
+        if not tag:
+            return False, "Missing inbound_definition/tag"
+
+        with SINGBOX_LOCAL_LOCK:
+            config = self._singbox_load_config()
+            inbounds = config.get("inbounds", [])
+            inbounds[:] = [i for i in inbounds if i.get("tag") != tag]
+            inbounds.append(inbound_definition)
+            config["inbounds"] = inbounds
+            self._singbox_save_config(config)
+
+        self._singbox_reload()
+        return True, f"sing-box inbound {tag} provisioned"
+
+    def _handle_singbox_inbound_remove(self, item):
+        inbound_tag = item.get("inbound_tag")
+        if not inbound_tag:
+            return False, "Missing inbound_tag"
+
+        with SINGBOX_LOCAL_LOCK:
+            config = self._singbox_load_config()
+            inbounds = config.get("inbounds", [])
+            inbounds[:] = [i for i in inbounds if i.get("tag") != inbound_tag]
+            config["inbounds"] = inbounds
+            self._singbox_save_config(config)
+
+        self._singbox_reload()
+        return True, f"sing-box inbound {inbound_tag} removed"
+
+    def _handle_singbox_sync_inbound_users(self, item):
+        inbound_tag = item.get("inbound_tag")
+        users = item.get("users")
+        if not inbound_tag or not isinstance(users, list):
+            return False, "Missing inbound_tag or users"
+
+        with SINGBOX_LOCAL_LOCK:
+            config = self._singbox_load_config()
+            target = None
+            for inb in config.get("inbounds", []):
+                if inb.get("tag") == inbound_tag:
+                    target = inb
+                    break
+            if target is None:
+                return False, f"Inbound {inbound_tag} not found on this node"
+            target["users"] = users
+            self._singbox_save_config(config)
+
+        self._singbox_reload()
+        return True, f"sing-box inbound {inbound_tag} users synced ({len(users)})"
+
     def _singbox_extract_sessions(self, detailed_users):
         sessions = []
 
