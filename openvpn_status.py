@@ -3740,6 +3740,11 @@ class StatusHandler(BaseHTTPRequestHandler):
                             except:
                                 pass
 
+                            try:
+                                self._singbox_kill_user(uname)
+                            except:
+                                pass
+
                             success = True
                             msg = "Full Kill Sent" if not wg_instance_failures else f"Full Kill Sent (warning: wg kick failed on: {', '.join(wg_instance_failures)})"
 
