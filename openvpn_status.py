@@ -494,6 +494,35 @@ class StatusHandler(BaseHTTPRequestHandler):
 
         return sessions
 
+    def _kill_local_l2tp_session(self, uname):
+        killed = False
+        try:
+            if os.path.exists(L2TP_ACTIVE_FILE):
+                with open(L2TP_ACTIVE_FILE, 'r') as f:
+                    fcntl.flock(f, fcntl.LOCK_SH)
+                    try:
+                        lines = f.readlines()
+                    finally:
+                        fcntl.flock(f, fcntl.LOCK_UN)
+
+                for line in lines:
+                    parts = line.strip().split(':')
+                    if len(parts) == 2 and parts[0] == uname:
+                        iface = parts[1]
+                        if not os.path.exists(f"/sys/class/net/{iface}"):
+                            continue
+                        try:
+                            with open(f"/var/run/{iface}.pid", 'r') as pf:
+                                pid = int(pf.read().strip() or 0)
+                            if pid > 0:
+                                subprocess.run(["kill", "-9", str(pid)], check=False, timeout=5)
+                                killed = True
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        return killed
+
     def _extract_l2tp_sessions(self, detailed_users):
         global L2TP_SESSION_CACHE, L2TP_CACHE_LOCK
 
@@ -1430,12 +1459,21 @@ class StatusHandler(BaseHTTPRequestHandler):
             unit_state = self._systemctl_state(f"wg-quick@{name}.service")
             if unit_state["state"] == "not-found":
                 unit_state = self._systemctl_state(f"wg-quick@{name}")
+            pub_key = None
+            try:
+                pub_path = f"/etc/wireguard/{name}_publickey"
+                if os.path.exists(pub_path):
+                    with open(pub_path, "r") as pf:
+                        pub_key = pf.read().strip() or None
+            except Exception:
+                pass
             instances.append({
                 "name": name,
                 "conf": conf,
                 "port": port,
                 "subnet": subnet,
-                "service": unit_state
+                "service": unit_state,
+                "public_key": pub_key
             })
         return instances
 
@@ -2388,8 +2426,8 @@ class StatusHandler(BaseHTTPRequestHandler):
                         "ip": source_ip,
                         "v_ip": "",
                         "interface": "singbox",
-                        "bytes_received": 0,
-                        "bytes_sent": 0,
+                        "bytes_received": upload,
+                        "bytes_sent": download,
                         "connected_at": connected_at,
                         "session_id": source_ip,
                         "source": "node",
@@ -2738,6 +2776,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                     "port": inst.get("port"),
                     "installed": wg_installed,
                     "service": inst.get("service") or {},
+                    "public_key": inst.get("public_key"),
                 })
         except Exception:
             pass
@@ -3673,7 +3712,7 @@ class StatusHandler(BaseHTTPRequestHandler):
 
                         if not success and uname:
                             try:
-                                subprocess.run(["pkill", "-9", "-f", f"pppd.*name {uname}"], check=False, timeout=5)
+                                self._kill_local_l2tp_session(uname)
                             except:
                                 pass
 
@@ -3772,7 +3811,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                             except Exception as e:
                                 protocol_failures.append(f"Cisco: {e}")
                             try:
-                                subprocess.run(["pkill", "-9", "-f", f"pppd.*name {uname}"], check=False, timeout=5)
+                                self._kill_local_l2tp_session(uname)
                             except:
                                 pass
                             try:
