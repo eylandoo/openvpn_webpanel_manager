@@ -72,6 +72,175 @@ def _is_valid_wg_instance_name(name):
     return bool(name) and bool(WG_INSTANCE_NAME_RE.match(str(name)))
 
 
+WG_DIR = "/etc/wireguard"
+WG_KEY_RE = re.compile(r'^[A-Za-z0-9+/]{43}=$')
+WG_PUBKEY_CACHE = {}
+WG_PEER_BATCH_SIZE = 200
+
+
+def _wg_key_valid(value):
+    return bool(WG_KEY_RE.match(str(value or "").strip()))
+
+
+def _wg_run(args, stdin=None, timeout=5):
+    try:
+        cp = subprocess.run(args, input=stdin, capture_output=True, text=True, check=False, timeout=timeout)
+        return cp.returncode, (cp.stdout or "").strip()
+    except Exception:
+        return 1, ""
+
+
+def _wg_read_text(path):
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            return f.read()
+    except Exception:
+        return ""
+
+
+def _wg_atomic_write(path, text, mode=0o600):
+    tmp = path + ".eyltmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except Exception:
+            pass
+    try:
+        os.chmod(tmp, mode)
+    except Exception:
+        pass
+    os.replace(tmp, path)
+
+
+def _wg_pubkey_from_private(private_key):
+    private_key = str(private_key or "").strip()
+    if not _wg_key_valid(private_key):
+        return ""
+    cached = WG_PUBKEY_CACHE.get(private_key)
+    if cached:
+        return cached
+    code, out = _wg_run(["wg", "pubkey"], stdin=private_key + "\n")
+    if code != 0 or not _wg_key_valid(out):
+        return ""
+    if len(WG_PUBKEY_CACHE) > 64:
+        WG_PUBKEY_CACHE.clear()
+    WG_PUBKEY_CACHE[private_key] = out
+    return out
+
+
+def _wg_conf_private_key(path):
+    for line in _wg_read_text(path).splitlines():
+        stripped = line.strip()
+        lowered = stripped.lower()
+        if lowered.startswith("[peer"):
+            break
+        if lowered.startswith("privatekey") and "=" in stripped:
+            return stripped.split("=", 1)[1].strip()
+    return ""
+
+
+def _wg_set_private_key_line(text, private_key):
+    lines = text.splitlines(True)
+    interface_start = None
+    interface_end = len(lines)
+    for index, line in enumerate(lines):
+        lowered = line.strip().lower()
+        if lowered.startswith("["):
+            if interface_start is None and lowered.startswith("[interface"):
+                interface_start = index
+            elif interface_start is not None:
+                interface_end = index
+                break
+    if interface_start is None:
+        return text
+    for index in range(interface_start + 1, interface_end):
+        lowered = lines[index].strip().lower()
+        if lowered.startswith("privatekey") and "=" in lowered:
+            lines[index] = f"PrivateKey = {private_key}\n"
+            return "".join(lines)
+    lines.insert(interface_start + 1, f"PrivateKey = {private_key}\n")
+    return "".join(lines)
+
+
+def _wg_key_state(iface):
+    live = ""
+    code, out = _wg_run(["wg", "show", iface, "public-key"])
+    if code == 0 and _wg_key_valid(out):
+        live = out
+    file_public = _wg_read_text(f"{WG_DIR}/{iface}_publickey").strip()
+    state = {
+        "live": live,
+        "key_file": _wg_pubkey_from_private(_wg_read_text(f"{WG_DIR}/{iface}_privatekey")),
+        "key_file_public": file_public if _wg_key_valid(file_public) else "",
+        "base": _wg_pubkey_from_private(_wg_conf_private_key(f"{WG_DIR}/{iface}_base.conf")),
+        "conf": _wg_pubkey_from_private(_wg_conf_private_key(f"{WG_DIR}/{iface}.conf")),
+    }
+    state["consistent"] = len({value for key, value in state.items() if key != "consistent" and value}) <= 1
+    return state
+
+
+def _wg_heal_base_private_key(iface):
+    base_path = f"{WG_DIR}/{iface}_base.conf"
+    text = _wg_read_text(base_path)
+    if not text.strip():
+        return False
+    code, live_public = _wg_run(["wg", "show", iface, "public-key"])
+    live_public = live_public if code == 0 and _wg_key_valid(live_public) else ""
+    file_private = _wg_read_text(f"{WG_DIR}/{iface}_privatekey").strip()
+    target = ""
+    if _wg_pubkey_from_private(file_private):
+        if live_public and _wg_pubkey_from_private(file_private) != live_public:
+            return False
+        target = file_private
+    elif live_public:
+        code, live_private = _wg_run(["wg", "show", iface, "private-key"])
+        if code == 0 and _wg_pubkey_from_private(live_private) == live_public:
+            target = live_private
+    if not target or _wg_conf_private_key(base_path) == target:
+        return False
+    updated = _wg_set_private_key_line(text, target)
+    if updated == text:
+        return False
+    try:
+        _wg_atomic_write(base_path, updated)
+    except Exception as e:
+        print(f"[WG] could not restore the {iface} base key: {e}", flush=True)
+        return False
+    print(f"[WG] {iface}_base.conf had a different PrivateKey than the key in use; restored", flush=True)
+    return True
+
+
+def _wg_adopt_interface_from_conf(iface, conf_text):
+    block = []
+    for line in str(conf_text or "").splitlines(True):
+        if line.strip().lower().startswith("[peer"):
+            break
+        block.append(line)
+    interface_text = "".join(block).strip()
+    if not interface_text.lower().startswith("[interface"):
+        return False
+    private_key = ""
+    for line in block:
+        stripped = line.strip()
+        if stripped.lower().startswith("privatekey") and "=" in stripped:
+            private_key = stripped.split("=", 1)[1].strip()
+            break
+    public_key = _wg_pubkey_from_private(private_key)
+    if not public_key:
+        return False
+    try:
+        os.makedirs(WG_DIR, exist_ok=True)
+        _wg_atomic_write(f"{WG_DIR}/{iface}_privatekey", private_key + "\n")
+        _wg_atomic_write(f"{WG_DIR}/{iface}_publickey", public_key + "\n")
+        _wg_atomic_write(f"{WG_DIR}/{iface}_base.conf", interface_text + "\n")
+    except Exception as e:
+        print(f"[WG] could not adopt the {iface} interface section: {e}", flush=True)
+        return False
+    return True
+
+
 L2TP_SESSION_CACHE = {}
 L2TP_CACHE_LOCK = threading.Lock()
 DETAILED_LOCK = threading.Lock()
@@ -950,6 +1119,8 @@ class StatusHandler(BaseHTTPRequestHandler):
             if not isinstance(peers, dict):
                 return False
 
+            _wg_heal_base_private_key(WG1_IFACE)
+
             base = self._wg1_read_base_conf().rstrip() + "\n\n"
             out = [base]
 
@@ -1021,7 +1192,7 @@ class StatusHandler(BaseHTTPRequestHandler):
             for _ in range(2):
                 try:
                     cp = subprocess.run(
-                        ["wg", "show", WG1_IFACE],
+                        ["wg", "show", WG1_IFACE, "listen-port"],
                         capture_output=True,
                         text=True,
                         timeout=5
@@ -1044,7 +1215,7 @@ class StatusHandler(BaseHTTPRequestHandler):
 
             try:
                 cp2 = subprocess.run(
-                    ["wg", "show", WG1_IFACE],
+                    ["wg", "show", WG1_IFACE, "listen-port"],
                     capture_output=True,
                     text=True,
                     timeout=5
@@ -1082,20 +1253,21 @@ class StatusHandler(BaseHTTPRequestHandler):
         except:
             return str(allowed_ips).strip() if allowed_ips else None
 
-    def _wg1_set_peer(self, pub_key, allowed_ips=None, preshared_key=None, reset_first=False):
+    def _wg1_set_peer(self, pub_key, allowed_ips=None, preshared_key=None, reset_first=False, ensure_runtime=True):
         if not pub_key:
             return False
 
         pub = str(pub_key).strip()
         allowed_norm = self._wg1_normalize_allowed_ips(allowed_ips)
 
-        ok_runtime, runtime_msg = self._wg1_ensure_runtime()
-        if not ok_runtime:
-            try:
-                print(f"[WG1] runtime unavailable before set peer: {runtime_msg}", flush=True)
-            except:
-                pass
-            return False
+        if ensure_runtime:
+            ok_runtime, runtime_msg = self._wg1_ensure_runtime()
+            if not ok_runtime:
+                try:
+                    print(f"[WG1] runtime unavailable before set peer: {runtime_msg}", flush=True)
+                except:
+                    pass
+                return False
 
         tmp_psk = None
 
@@ -1157,6 +1329,89 @@ class StatusHandler(BaseHTTPRequestHandler):
                     os.unlink(tmp_psk.name)
                 except:
                     pass
+
+    def _wg1_apply_peer_changes(self, changes):
+        if not changes:
+            return True
+        ok_runtime, runtime_msg = self._wg1_ensure_runtime()
+        if not ok_runtime:
+            try:
+                print(f"[WG1] runtime unavailable before peer sync: {runtime_msg}", flush=True)
+            except:
+                pass
+            return False
+        all_ok = True
+        for start in range(0, len(changes), WG_PEER_BATCH_SIZE):
+            chunk = changes[start:start + WG_PEER_BATCH_SIZE]
+            temp_files = []
+            batch_ok = False
+            try:
+                cmd = ["wg", "set", WG1_IFACE]
+                for pub, allowed, psk in chunk:
+                    cmd += ["peer", pub]
+                    if allowed:
+                        cmd += ["allowed-ips", allowed]
+                    if psk:
+                        tmp = tempfile.NamedTemporaryFile(mode="w", delete=False)
+                        tmp.write(str(psk).strip() + "\n")
+                        tmp.close()
+                        temp_files.append(tmp.name)
+                        try:
+                            os.chmod(tmp.name, 0o600)
+                        except:
+                            pass
+                        cmd += ["preshared-key", tmp.name]
+                cp = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=60)
+                batch_ok = cp.returncode == 0
+            except:
+                batch_ok = False
+            finally:
+                for name in temp_files:
+                    try:
+                        os.unlink(name)
+                    except:
+                        pass
+            if batch_ok:
+                for pub, _allowed, _psk in chunk:
+                    WG1_PEER_ACTIVITY.pop(pub, None)
+                continue
+            for pub, allowed, psk in chunk:
+                if not self._wg1_set_peer(pub, allowed_ips=allowed, preshared_key=psk, reset_first=False, ensure_runtime=False):
+                    all_ok = False
+        return all_ok
+
+    def _wg1_remove_peers_batch(self, pubs):
+        pubs = [str(p).strip() for p in pubs if p and str(p).strip()]
+        if not pubs:
+            return True
+        ok_runtime, _runtime_msg = self._wg1_ensure_runtime()
+        if not ok_runtime:
+            return True
+        all_ok = True
+        for start in range(0, len(pubs), WG_PEER_BATCH_SIZE):
+            chunk = pubs[start:start + WG_PEER_BATCH_SIZE]
+            cmd = ["wg", "set", WG1_IFACE]
+            for pub in chunk:
+                cmd += ["peer", pub, "remove"]
+            try:
+                cp = subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+                batch_ok = cp.returncode == 0
+            except:
+                batch_ok = False
+            if batch_ok:
+                for pub in chunk:
+                    WG1_PEER_ACTIVITY.pop(pub, None)
+                continue
+            for pub in chunk:
+                try:
+                    WG1_PEER_ACTIVITY.pop(pub, None)
+                    cp = subprocess.run(["wg", "set", WG1_IFACE, "peer", pub, "remove"], check=False,
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+                    if cp.returncode != 0:
+                        all_ok = False
+                except:
+                    all_ok = False
+        return all_ok
 
     def _wg1_remove_peer(self, pub_key):
         if not pub_key:
@@ -1560,6 +1815,7 @@ class StatusHandler(BaseHTTPRequestHandler):
             peers = self._wg_instance_load_peers_db(instance_name)
             if not isinstance(peers, dict):
                 return False
+            _wg_heal_base_private_key(instance_name)
             base = self._wg_instance_read_base_conf(instance_name).rstrip() + "\n\n"
             out = [base]
             for uname, pdata in peers.items():
@@ -1625,7 +1881,7 @@ class StatusHandler(BaseHTTPRequestHandler):
 
             for _ in range(2):
                 try:
-                    cp = subprocess.run(["wg", "show", instance_name], capture_output=True, text=True, timeout=5)
+                    cp = subprocess.run(["wg", "show", instance_name, "listen-port"], capture_output=True, text=True, timeout=5)
                     if cp.returncode == 0:
                         return True, "ok"
                 except Exception:
@@ -1639,7 +1895,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                     pass
 
             try:
-                cp2 = subprocess.run(["wg", "show", instance_name], capture_output=True, text=True, timeout=5)
+                cp2 = subprocess.run(["wg", "show", instance_name, "listen-port"], capture_output=True, text=True, timeout=5)
                 if cp2.returncode == 0:
                     return True, "ok"
                 return False, (cp2.stderr or "wg interface not active").strip()
@@ -1647,6 +1903,48 @@ class StatusHandler(BaseHTTPRequestHandler):
                 return False, str(e)
         except Exception as e:
             return False, str(e)
+
+    def _wg_instance_is_running(self, instance_name):
+        try:
+            cp = subprocess.run(["wg", "show", instance_name, "listen-port"], capture_output=True, text=True, timeout=5)
+            return cp.returncode == 0
+        except Exception:
+            return False
+
+    def _wg_instance_strip_peer_from_conf(self, instance_name, pub_key):
+        conf_path = f"/etc/wireguard/{instance_name}.conf"
+        try:
+            if not os.path.exists(conf_path):
+                return True
+            with open(conf_path, "r", encoding="utf-8", errors="ignore") as f:
+                text = f.read()
+            kept = []
+            removed = False
+            for block in re.split(r"(?m)^(?=\[(?:Interface|Peer)\])", text):
+                if block.lstrip().startswith("[Peer]"):
+                    m = re.search(r"(?m)^\s*PublicKey\s*=\s*(\S+)", block)
+                    if m and m.group(1) == pub_key:
+                        removed = True
+                        continue
+                kept.append(block)
+            if not removed:
+                return True
+            tmp = conf_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write("".join(kept))
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except Exception:
+                    pass
+            try:
+                os.chmod(tmp, 0o600)
+            except Exception:
+                pass
+            os.replace(tmp, conf_path)
+            return True
+        except Exception:
+            return False
 
     def _wg_instance_remove_peer(self, instance_name, pub_key):
         if not pub_key:
@@ -1657,7 +1955,8 @@ class StatusHandler(BaseHTTPRequestHandler):
         except Exception:
             pass
         try:
-            self._wg_instance_ensure_runtime(instance_name)
+            if not self._wg_instance_is_running(instance_name):
+                return self._wg_instance_strip_peer_from_conf(instance_name, pub_key)
             cp = subprocess.run(
                 ["wg", "set", instance_name, "peer", str(pub_key).strip(), "remove"],
                 check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10
@@ -1670,6 +1969,8 @@ class StatusHandler(BaseHTTPRequestHandler):
         if not pub_key:
             return False
         pub = str(pub_key).strip()
+        if not self._wg_instance_is_running(instance_name):
+            return True
         db = self._wg_instance_load_peers_db(instance_name)
         info = None
         for _u, d in (db or {}).items():
@@ -1712,6 +2013,8 @@ class StatusHandler(BaseHTTPRequestHandler):
         if not pub_key:
             return False
         pub = str(pub_key).strip()
+        if not self._wg_instance_is_running(instance_name):
+            return True
         key = (instance_name, pub)
         with WG_KICK_GENERATION_LOCK:
             gen = WG_KICK_GENERATION.get(key, 0) + 1
@@ -2777,6 +3080,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                     "installed": wg_installed,
                     "service": inst.get("service") or {},
                     "public_key": inst.get("public_key"),
+                    "key_state": _wg_key_state(inst.get("name")),
                 })
         except Exception:
             pass
@@ -2859,6 +3163,8 @@ class StatusHandler(BaseHTTPRequestHandler):
                                 old_file_content = f.read().strip()
                         if old_file_content != wg_conf.strip():
                             ok = self._wg1_write_conf(wg_conf)
+                            if ok is True:
+                                _wg_adopt_interface_from_conf(WG1_IFACE, wg_conf)
                             if ok is True and bool(data.get("restart", True)):
                                 self._wg1_restart()
                         else:
@@ -3072,6 +3378,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                                                 if allowed and not info.get("allowed_ips"):
                                                     info["allowed_ips"] = str(allowed).strip()
                                                 self._wg1_save_peers_db(dbp)
+                                                self._wg1_rebuild_conf_from_peers_db()
                             except:
                                 pass
 
@@ -3104,6 +3411,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                                             entry["disabled"] = False
                                             inst_db[uname] = entry
                                             self._wg_instance_save_peers_db(inst_name, inst_db)
+                                            self._wg_instance_rebuild_conf_from_peers_db(inst_name)
                                     except Exception:
                                         wg_instance_failures.append(inst_name)
                             except:
@@ -3157,6 +3465,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                                     if isinstance(dbp.get(uname), dict):
                                         dbp[uname]["disabled"] = True
                                     self._wg1_save_peers_db(dbp)
+                                    self._wg1_rebuild_conf_from_peers_db()
                             except:
                                 pass
                             wg_instance_failures = []
@@ -3178,6 +3487,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                                                 entry["disabled"] = True
                                                 inst_db[uname] = entry
                                                 self._wg_instance_save_peers_db(inst_name, inst_db)
+                                                self._wg_instance_rebuild_conf_from_peers_db(inst_name)
                                     except Exception:
                                         wg_instance_failures.append(inst_name)
                             except:
@@ -3220,6 +3530,8 @@ class StatusHandler(BaseHTTPRequestHandler):
                             wg_conf = item.get("conf")
                         if wg_conf is not None:
                             ok = self._wg1_write_conf(wg_conf)
+                            if ok is True:
+                                _wg_adopt_interface_from_conf(WG1_IFACE, wg_conf)
                             if ok is True and bool(item.get("restart", True)):
                                 self._wg1_restart()
                             success = bool(ok)
@@ -3361,18 +3673,19 @@ class StatusHandler(BaseHTTPRequestHandler):
                         ok = True
 
                         desired_pubs = set()
+                        pending_changes = []
                         db = self._wg1_load_peers_db() or {}
 
                         current_wg_peers = {}
                         try:
-                            dump_proc = subprocess.run(["wg", "show", WG1_IFACE, "dump"], capture_output=True, text=True, timeout=5)
+                            dump_proc = subprocess.run(["wg", "show", WG1_IFACE, "dump"], capture_output=True, text=True, timeout=30)
                             if dump_proc.returncode == 0:
                                 lines = dump_proc.stdout.strip().splitlines()
                                 if len(lines) > 1:
                                     for line in lines[1:]:
                                         parts = line.split("\t")
                                         if len(parts) >= 4:
-                                            current_wg_peers[parts[0].strip()] = parts[3].strip()
+                                            current_wg_peers[parts[0].strip()] = (parts[3].strip(), parts[1].strip())
                         except:
                             pass
 
@@ -3391,7 +3704,8 @@ class StatusHandler(BaseHTTPRequestHandler):
                                     allowed_norm = self._wg1_normalize_allowed_ips(allowed)
                                     needs_update = True
 
-                                    if pub in current_wg_peers and current_wg_peers[pub] == (allowed_norm or "") and not psk:
+                                    current_entry = current_wg_peers.get(pub)
+                                    if current_entry is not None and current_entry[0] == (allowed_norm or "") and (not psk or current_entry[1] == str(psk).strip()):
                                         needs_update = False
 
                                     block_until = WG_TEMP_BLOCKED_UNTIL.get(("wg1", pub))
@@ -3399,7 +3713,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                                         needs_update = False
 
                                     if needs_update:
-                                        self._wg1_set_peer(pub, allowed_ips=allowed, preshared_key=psk, reset_first=False)
+                                        pending_changes.append((pub, allowed_norm, str(psk).strip() if psk else None))
 
                                     if uname_p:
                                         if uname_p not in db or not isinstance(db.get(uname_p), dict):
@@ -3414,13 +3728,15 @@ class StatusHandler(BaseHTTPRequestHandler):
                                     ok = False
                                     continue
 
+                            if pending_changes and not self._wg1_apply_peer_changes(pending_changes):
+                                ok = False
+
                             if remove_unknown:
                                 try:
-                                    r = subprocess.run(["wg", "show", WG1_IFACE, "peers"], capture_output=True, text=True, timeout=5)
+                                    r = subprocess.run(["wg", "show", WG1_IFACE, "peers"], capture_output=True, text=True, timeout=30)
                                     if r.returncode == 0:
-                                        for pub in (r.stdout or "").split():
-                                            if pub and pub not in desired_pubs:
-                                                self._wg1_remove_peer(pub)
+                                        unknown_pubs = [pub for pub in (r.stdout or "").split() if pub and pub not in desired_pubs]
+                                        self._wg1_remove_peers_batch(unknown_pubs)
                                 except:
                                     pass
 
@@ -3923,6 +4239,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                                         os.replace(tmp, path)
 
                                     _atomic_write("/etc/wireguard/wg1.conf", wg_conf, 0o600)
+                                    _wg_adopt_interface_from_conf(WG1_IFACE, wg_conf)
                                     _atomic_write("/etc/wireguard/wg1_peers.json", peers_json, 0o600)
 
                                     if listen_port is not None:
@@ -4128,6 +4445,7 @@ def background_monitor_engine():
                 "wireguard": {
                     "iface": WG1_IFACE,
                     "public_key": dummy_handler._wg1_get_iface_public_key(),
+                    "key_state": _wg_key_state(WG1_IFACE),
                     "listen_port": dummy_handler._wg1_get_listen_port()
                 },
                 "services": dummy_handler._services_status(),
