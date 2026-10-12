@@ -60,7 +60,7 @@ ensure_config_exists() {
     cat > "$CONF_PATH" <<'EOF'
 {
   "log": {
-    "level": "info",
+    "level": "warn",
     "output": "/var/log/eylan-singbox/access.log",
     "timestamp": true
   },
