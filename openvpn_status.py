@@ -19,6 +19,7 @@ import re
 import urllib.request
 import urllib.error
 
+AGENT_VERSION = "20261013.3"
 PORT = 7506
 OPENVPN_CONF_DIR = "/etc/openvpn/server/"
 CCD_DIR = "/etc/openvpn/server/ccd/"
@@ -2637,6 +2638,30 @@ class StatusHandler(BaseHTTPRequestHandler):
         self._singbox_reload()
         return True, f"sing-box inbound {inbound_tag} removed"
 
+    def _handle_ovpn_gate_reasons(self, item):
+        state_dir = "/etc/eylan-ovpn-gate"
+        content = item.get("content")
+        if not isinstance(content, str) or len(content) > 4 * 1024 * 1024:
+            return False, "Invalid content"
+        try:
+            data = json.loads(content)
+        except Exception:
+            return False, "Invalid JSON"
+        users = data.get("users") if isinstance(data, dict) else None
+        if not isinstance(users, dict):
+            return False, "Invalid structure"
+        for name, text in users.items():
+            if not isinstance(name, str) or not isinstance(text, str) or len(name) > 128 or len(text) > 400:
+                return False, "Invalid entry"
+        if not os.path.isdir(state_dir):
+            return False, "Gate is not installed"
+        target = os.path.join(state_dir, "reasons.json")
+        tmp = target + ".agent.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp, target)
+        return True, "Reasons updated"
+
     def _handle_singbox_sync_inbound_users(self, item):
         inbound_tag = item.get("inbound_tag")
         users = item.get("users")
@@ -4365,6 +4390,9 @@ class StatusHandler(BaseHTTPRequestHandler):
                     elif cmd == "singbox_kill_user":
                         killed_count = self._singbox_kill_user(uname)
                         success, msg = True, f"Killed {killed_count} sing-box connection(s) for {uname}"
+
+                    elif cmd == "ovpn_gate_reasons":
+                        success, msg = self._handle_ovpn_gate_reasons(item)
 
                     result_obj = {"username": uname, "success": success, "message": msg}
                     if isinstance(res_extra, dict) and res_extra:
